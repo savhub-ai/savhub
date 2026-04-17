@@ -15,20 +15,20 @@ savhub-local = { path = "client/local" }
 # -- Shared across server & client --
 anyhow = "1.0.102"
 chrono = { version = "0.4.44", features = ["clock", "serde"] }
-clap = { version = "4.6.0", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 dialoguer = "0.12.0"
 directories = "6.0.0"
 dioxus = "0.7.5"
 dioxus-router = "0.7.4"
 regex = "1.12.3"
 reqwest = { version = "0.13.2", default-features = false, features = ["json", "rustls"] }
-semver = { version = "1.0.27", features = ["serde"] }
+semver = { version = "1.0.28", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 sha2 = "0.11.0"
-tokio = { version = "1.51.1", features = ["full"] }
-toml = "1.1.0"
-uuid = { version = "1.23.0", features = ["serde", "v4", "v7", "js"] }
+tokio = { version = "1.52.1", features = ["full"] }
+toml = "1.1.2"
+uuid = { version = "1.23.1", features = ["serde", "v4", "v7", "js"] }
 walkdir = "2.5.0"
 zip = { version = "8.5.1", default-features = false, features = ["deflate"] }
 
@@ -41,7 +41,7 @@ diesel = { version = "2.3.7", features = [
 # C2 phase 0: introduce diesel-async + bb8 alongside the existing sync stack.
 # Modules will be ported to AsyncPgConnection one at a time; both pools live
 # in app_state until the migration is complete.
-diesel-async = { version = "0.7", features = ["postgres", "bb8"] }
+diesel-async = { version = "0.8", features = ["postgres", "bb8"] }
 diesel_migrations = "2.3.1"
 dotenvy = "0.15.7"
 futures-util = "0.3.32"
@@ -52,7 +52,7 @@ once_cell = "1.21.4"
 pq-sys = { version = "0.7.5", features = ["bundled"] }
 pulldown-cmark = "0.13.3"
 rust-embed = { version = "8.11.0", features = ["interpolate-folder-path"] }
-salvo = { version = "0.91.1", features = ["cors", "websocket", "serve-static"] }
+salvo = { version = "0.92.0", features = ["cors", "websocket", "serve-static"] }
 serde-saphyr = "0.0.23"
 thiserror = "2.0.18"
 tracing = "0.1.44"
@@ -60,9 +60,9 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 
 # -- Web frontend --
 gloo-timers = { version = "0.4.0", features = ["futures"] }
-wasm-bindgen = "0.2.117"
-wasm-bindgen-futures = "0.4.67"
-web-sys = { version = "0.3.91", features = ["Window", "Location", "Storage", "History", "WebSocket", "MessageEvent", "Navigator", "Clipboard"] }
+wasm-bindgen = "0.2.118"
+wasm-bindgen-futures = "0.4.68"
+web-sys = { version = "0.3.95", features = ["Window", "Location", "Storage", "History", "WebSocket", "MessageEvent", "Navigator", "Clipboard"] }
 
 # -- Client-only --
 arboard = "3.6.1"
