@@ -1,0 +1,12 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Keep security updates enabled without turning on general version-update PRs.
+    open-pull-requests-limit: 0
+    ignore:
+      # Transitive through dioxus-desktop -> wry/gtk 0.18 on Linux.
+      # Dependabot cannot currently resolve this workspace to glib >= 0.20.
+      - dependency-name: "glib"
