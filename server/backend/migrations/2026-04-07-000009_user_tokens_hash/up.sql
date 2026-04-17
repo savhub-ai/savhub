@@ -8,6 +8,10 @@ ALTER TABLE user_tokens
     ADD COLUMN token_hash TEXT,
     ADD COLUMN token_prefix TEXT;
 
+-- digest() lives in pgcrypto. Enable it before the first backfill on
+-- databases that don't already have the extension.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Backfill: SHA-256 hex of the existing plaintext token, plus a short
 -- non-secret prefix for UI display.
 UPDATE user_tokens
@@ -15,20 +19,6 @@ SET
     token_hash = encode(digest(token, 'sha256'), 'hex'),
     token_prefix = substr(token, 1, 12)
 WHERE token_hash IS NULL;
-
--- digest() lives in pgcrypto. Enable it on databases that haven't yet.
--- (No-op on managed PG where it's already enabled.)
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pgcrypto') THEN
-        CREATE EXTENSION IF NOT EXISTS pgcrypto;
-        UPDATE user_tokens
-        SET
-            token_hash = encode(digest(token, 'sha256'), 'hex'),
-            token_prefix = substr(token, 1, 12)
-        WHERE token_hash IS NULL;
-    END IF;
-END $$;
 
 ALTER TABLE user_tokens
     ALTER COLUMN token_hash SET NOT NULL,
