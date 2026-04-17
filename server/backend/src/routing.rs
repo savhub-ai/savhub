@@ -66,7 +66,14 @@ pub fn router() -> Router {
             .push(
                 Router::with_path("users")
                     .get(list_users)
-                    .push(Router::with_path("{handle}").get(get_user_profile)),
+                    .push(
+                        Router::with_path("{handle}")
+                            .get(get_user_profile)
+                            .push(Router::with_path("published-skills").get(get_user_published_skills))
+                            .push(Router::with_path("starred-skills").get(get_user_starred_skills))
+                            .push(Router::with_path("starred-flocks").get(get_user_starred_flocks))
+                            .push(Router::with_path("history").get(get_user_history)),
+                    ),
             )
             .push(
                 Router::with_path("docs/{lang}")
@@ -704,6 +711,69 @@ async fn get_user_profile(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
     let auth = optional_auth(req).ok().flatten();
     match users::get_user_profile(&handle, auth.as_ref().map(|ctx| &ctx.user)) {
+        Ok(payload) => res.render(Json(payload)),
+        Err(error) => render_error(res, error),
+    }
+}
+
+#[handler]
+async fn get_user_published_skills(req: &mut Request, res: &mut Response) {
+    let handle = req.param::<String>("handle").unwrap_or_default();
+    let auth = optional_auth(req).ok().flatten();
+    let limit = req.query::<i64>("limit").unwrap_or(20);
+    let cursor = req.query::<String>("cursor");
+    match users::get_user_published_skills(
+        &handle,
+        auth.as_ref().map(|ctx| &ctx.user),
+        limit,
+        cursor,
+    ) {
+        Ok(payload) => res.render(Json(payload)),
+        Err(error) => render_error(res, error),
+    }
+}
+
+#[handler]
+async fn get_user_starred_skills(req: &mut Request, res: &mut Response) {
+    let handle = req.param::<String>("handle").unwrap_or_default();
+    let auth = optional_auth(req).ok().flatten();
+    let limit = req.query::<i64>("limit").unwrap_or(20);
+    let cursor = req.query::<String>("cursor");
+    match users::get_user_starred_skills(
+        &handle,
+        auth.as_ref().map(|ctx| &ctx.user),
+        limit,
+        cursor,
+    ) {
+        Ok(payload) => res.render(Json(payload)),
+        Err(error) => render_error(res, error),
+    }
+}
+
+#[handler]
+async fn get_user_starred_flocks(req: &mut Request, res: &mut Response) {
+    let handle = req.param::<String>("handle").unwrap_or_default();
+    let auth = optional_auth(req).ok().flatten();
+    let limit = req.query::<i64>("limit").unwrap_or(20);
+    let cursor = req.query::<String>("cursor");
+    match users::get_user_starred_flocks(
+        &handle,
+        auth.as_ref().map(|ctx| &ctx.user),
+        limit,
+        cursor,
+    ) {
+        Ok(payload) => res.render(Json(payload)),
+        Err(error) => render_error(res, error),
+    }
+}
+
+#[handler]
+async fn get_user_history(req: &mut Request, res: &mut Response) {
+    let handle = req.param::<String>("handle").unwrap_or_default();
+    let auth = optional_auth(req).ok().flatten();
+    let limit = req.query::<i64>("limit").unwrap_or(20);
+    let cursor = req.query::<String>("cursor");
+    match users::get_user_history(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor) {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }

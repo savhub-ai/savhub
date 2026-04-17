@@ -1,22 +1,24 @@
 use std::collections::{HashMap, HashSet};
 
+use diesel::dsl::count_star;
 use diesel::prelude::*;
-use shared::{UserListItem, UserListResponse, UserProfileResponse, UserRole};
+use shared::{
+    BrowseHistoryItem, FlockSummary, PagedResponse, SkillListItem, UserListItem, UserListResponse,
+    UserProfileResponse, UserProfileStats, UserRole,
+};
 use uuid::Uuid;
 
-use super::browse_history;
 use super::helpers::{
     db_conn, load_skill_versions_map, load_users_map, skill_item_from_rows, user_summary_from_row,
 };
 use super::repos::{flock_summary_from_row, load_flock_skill_counts};
 use crate::auth::RequestUser;
 use crate::error::AppError;
-use crate::models::{FlockRow, RepoRow, SkillRow, SkillStarRow, SkillVersionRow, UserRow};
-use crate::schema::{flocks, repos, skill_stars, skill_versions, skills, users};
+use crate::models::{BrowseHistoryRow, FlockRow, RepoRow, SkillRow, UserRow};
+use crate::schema::{browse_histories, flocks, repos, skill_stars, skill_versions, skills, users};
 
-const PROFILE_SKILL_LIMIT: usize = 24;
-const PROFILE_FLOCK_LIMIT: usize = 12;
-const PROFILE_HISTORY_LIMIT: i64 = 20;
+const PROFILE_PAGE_SIZE_MAX: i64 = 100;
+const PROFILE_HISTORY_PAGE_SIZE_MAX: i64 = 200;
 
 pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, AppError> {
     let mut conn = db_conn()?;
@@ -42,7 +44,6 @@ pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, A
         })
         .collect::<Vec<_>>();
 
-    // Count skills per user by looking at flocks imported by each user
     let flock_rows = flocks::table
         .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
@@ -91,109 +92,231 @@ pub fn get_user_profile(
     viewer: Option<&RequestUser>,
 ) -> Result<UserProfileResponse, AppError> {
     let mut conn = db_conn()?;
-    let user = users::table
-        .filter(users::handle.eq(handle_value))
-        .select(UserRow::as_select())
-        .first::<UserRow>(&mut conn)
-        .optional()?
-        .ok_or_else(|| AppError::NotFound(format!("user `{handle_value}` not found")))?;
-
-    let viewer_is_staff = viewer
-        .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
-        .unwrap_or(false);
-    let is_self = viewer.map(|viewer| viewer.id == user.id).unwrap_or(false);
-
-    let published_skills = load_published_skills(&mut conn, user.id, viewer_is_staff)?;
-    let starred_skills = if is_self {
-        load_starred_skills(&mut conn, user.id, viewer_is_staff)?
+    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let published_skill_ids = published_skill_ids_for_user(&mut conn, context.user.id)?;
+    let starred_skill_ids = if context.is_self {
+        starred_skill_ids_for_user(&mut conn, context.user.id)?
     } else {
         Vec::new()
     };
-    let starred_flocks = if is_self {
-        load_starred_flocks(&mut conn, user.id)?
+    let starred_flock_ids = if context.is_self {
+        starred_flock_ids_for_user(&mut conn, context.user.id)?
     } else {
         Vec::new()
     };
-    let history = if is_self {
-        browse_history::get_history_for_user_id_with_conn(
-            &mut conn,
-            user.id,
-            PROFILE_HISTORY_LIMIT,
-        )?
-        .items
+    let history_count = if context.is_self {
+        browse_histories::table
+            .filter(browse_histories::user_id.eq(context.user.id))
+            .select(count_star())
+            .first::<i64>(&mut conn)?
     } else {
-        Vec::new()
+        0
     };
 
     Ok(UserProfileResponse {
-        user: user_summary_from_row(&user),
-        bio: user.bio.clone(),
-        joined_at: user.created_at,
-        github_login: user.github_login.clone(),
-        is_self,
-        published_skills,
-        starred_skills,
-        starred_flocks,
-        history,
+        user: user_summary_from_row(&context.user),
+        bio: context.user.bio.clone(),
+        joined_at: context.user.created_at,
+        github_login: context.user.github_login.clone(),
+        is_self: context.is_self,
+        stats: UserProfileStats {
+            published_skills: published_skill_ids.len() as i64,
+            starred_skills: starred_skill_ids.len() as i64,
+            starred_flocks: starred_flock_ids.len() as i64,
+            history: history_count,
+        },
     })
 }
 
-fn load_published_skills(
+pub fn get_user_published_skills(
+    handle_value: &str,
+    viewer: Option<&RequestUser>,
+    limit: i64,
+    cursor: Option<String>,
+) -> Result<PagedResponse<SkillListItem>, AppError> {
+    let mut conn = db_conn()?;
+    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let viewer_is_staff = viewer
+        .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
+        .unwrap_or(false);
+    let skill_ids = published_skill_ids_for_user(&mut conn, context.user.id)?;
+    let (page_ids, next_cursor) = paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
+    Ok(PagedResponse { items, next_cursor })
+}
+
+pub fn get_user_starred_skills(
+    handle_value: &str,
+    viewer: Option<&RequestUser>,
+    limit: i64,
+    cursor: Option<String>,
+) -> Result<PagedResponse<SkillListItem>, AppError> {
+    let mut conn = db_conn()?;
+    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    if !context.is_self {
+        return Err(AppError::Forbidden(
+            "starred skills are only visible on your own profile".to_string(),
+        ));
+    }
+    let viewer_is_staff = viewer
+        .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
+        .unwrap_or(false);
+    let skill_ids = starred_skill_ids_for_user(&mut conn, context.user.id)?;
+    let (page_ids, next_cursor) = paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
+    Ok(PagedResponse { items, next_cursor })
+}
+
+pub fn get_user_starred_flocks(
+    handle_value: &str,
+    viewer: Option<&RequestUser>,
+    limit: i64,
+    cursor: Option<String>,
+) -> Result<PagedResponse<FlockSummary>, AppError> {
+    let mut conn = db_conn()?;
+    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    if !context.is_self {
+        return Err(AppError::Forbidden(
+            "starred flocks are only visible on your own profile".to_string(),
+        ));
+    }
+    let flock_ids = starred_flock_ids_for_user(&mut conn, context.user.id)?;
+    let (page_ids, next_cursor) = paginate_unique_ids(flock_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let items = load_flock_items(&mut conn, page_ids)?;
+    Ok(PagedResponse { items, next_cursor })
+}
+
+pub fn get_user_history(
+    handle_value: &str,
+    viewer: Option<&RequestUser>,
+    limit: i64,
+    cursor: Option<String>,
+) -> Result<PagedResponse<BrowseHistoryItem>, AppError> {
+    let mut conn = db_conn()?;
+    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    if !context.is_self {
+        return Err(AppError::Forbidden(
+            "browse history is only visible on your own profile".to_string(),
+        ));
+    }
+    let limit = limit.clamp(1, PROFILE_HISTORY_PAGE_SIZE_MAX);
+    let offset = parse_cursor(cursor);
+    let mut rows = browse_histories::table
+        .filter(browse_histories::user_id.eq(context.user.id))
+        .order(browse_histories::viewed_at.desc())
+        .limit(limit + 1)
+        .offset(offset)
+        .select(BrowseHistoryRow::as_select())
+        .load::<BrowseHistoryRow>(&mut conn)?;
+
+    let next_cursor = if rows.len() > limit as usize {
+        rows.pop();
+        Some((offset + limit).to_string())
+    } else {
+        None
+    };
+
+    let items = super::browse_history::hydrate_history_items_for_user_page(&mut conn, rows)?;
+    Ok(PagedResponse { items, next_cursor })
+}
+
+struct ProfileContext {
+    user: UserRow,
+    is_self: bool,
+}
+
+fn load_profile_context(
+    conn: &mut PgConnection,
+    handle_value: &str,
+    viewer: Option<&RequestUser>,
+) -> Result<ProfileContext, AppError> {
+    let user = users::table
+        .filter(users::handle.eq(handle_value))
+        .select(UserRow::as_select())
+        .first::<UserRow>(conn)
+        .optional()?
+        .ok_or_else(|| AppError::NotFound(format!("user `{handle_value}` not found")))?;
+    let is_self = viewer.map(|viewer| viewer.id == user.id).unwrap_or(false);
+    Ok(ProfileContext { user, is_self })
+}
+
+fn published_skill_ids_for_user(
     conn: &mut PgConnection,
     user_id: Uuid,
-    viewer_is_staff: bool,
-) -> Result<Vec<shared::SkillListItem>, AppError> {
-    let version_rows = skill_versions::table
+) -> Result<Vec<Uuid>, AppError> {
+    let ids = skill_versions::table
         .filter(skill_versions::created_by.eq(user_id))
         .filter(skill_versions::soft_deleted_at.is_null())
         .order(skill_versions::created_at.desc())
-        .select(SkillVersionRow::as_select())
-        .load::<SkillVersionRow>(conn)?;
-    let skill_ids = ordered_unique_ids(
-        version_rows.iter().filter_map(|row| row.skill_id),
-        PROFILE_SKILL_LIMIT,
-    );
-    load_skill_items(conn, skill_ids, viewer_is_staff)
+        .select(skill_versions::skill_id)
+        .load::<Option<Uuid>>(conn)?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(ordered_unique_ids(ids))
 }
 
-fn load_starred_skills(
-    conn: &mut PgConnection,
-    user_id: Uuid,
-    viewer_is_staff: bool,
-) -> Result<Vec<shared::SkillListItem>, AppError> {
-    let star_rows = skill_stars::table
+fn starred_skill_ids_for_user(conn: &mut PgConnection, user_id: Uuid) -> Result<Vec<Uuid>, AppError> {
+    let ids = skill_stars::table
         .filter(skill_stars::user_id.eq(user_id))
         .filter(skill_stars::skill_id.is_not_null())
         .order(skill_stars::created_at.desc())
-        .select(SkillStarRow::as_select())
-        .load::<SkillStarRow>(conn)?;
-    let skill_ids = ordered_unique_ids(
-        star_rows.iter().filter_map(|row| row.skill_id),
-        PROFILE_SKILL_LIMIT,
-    );
-    load_skill_items(conn, skill_ids, viewer_is_staff)
+        .select(skill_stars::skill_id)
+        .load::<Option<Uuid>>(conn)?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(ordered_unique_ids(ids))
 }
 
-fn load_starred_flocks(
-    conn: &mut PgConnection,
-    user_id: Uuid,
-) -> Result<Vec<shared::FlockSummary>, AppError> {
-    let star_rows = skill_stars::table
+fn starred_flock_ids_for_user(conn: &mut PgConnection, user_id: Uuid) -> Result<Vec<Uuid>, AppError> {
+    let ids = skill_stars::table
         .filter(skill_stars::user_id.eq(user_id))
         .filter(skill_stars::skill_id.is_null())
         .order(skill_stars::created_at.desc())
-        .select(SkillStarRow::as_select())
-        .load::<SkillStarRow>(conn)?;
-    let flock_ids = ordered_unique_ids(
-        star_rows.iter().map(|row| row.flock_id),
-        PROFILE_FLOCK_LIMIT,
-    );
-    if flock_ids.is_empty() {
+        .select(skill_stars::flock_id)
+        .load::<Uuid>(conn)?;
+    Ok(ordered_unique_ids(ids))
+}
+
+fn paginate_unique_ids(
+    ids: Vec<Uuid>,
+    limit: i64,
+    cursor: Option<String>,
+    max_limit: i64,
+) -> (Vec<Uuid>, Option<String>) {
+    let limit = limit.clamp(1, max_limit) as usize;
+    let offset = parse_cursor(cursor) as usize;
+    if offset >= ids.len() {
+        return (Vec::new(), None);
+    }
+    let end = (offset + limit).min(ids.len());
+    let next_cursor = if end < ids.len() {
+        Some(end.to_string())
+    } else {
+        None
+    };
+    (ids[offset..end].to_vec(), next_cursor)
+}
+
+fn parse_cursor(cursor: Option<String>) -> i64 {
+    cursor
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0)
+        .max(0)
+}
+
+fn load_flock_items(
+    conn: &mut PgConnection,
+    ordered_flock_ids: Vec<Uuid>,
+) -> Result<Vec<FlockSummary>, AppError> {
+    if ordered_flock_ids.is_empty() {
         return Ok(Vec::new());
     }
 
     let flock_rows = flocks::table
-        .filter(flocks::id.eq_any(&flock_ids))
+        .filter(flocks::id.eq_any(&ordered_flock_ids))
+        .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
         .load::<FlockRow>(conn)?;
     let repo_rows = repos::table
@@ -207,7 +330,7 @@ fn load_starred_flocks(
             .map(|row| row.imported_by_user_id)
             .collect::<Vec<_>>(),
     )?;
-    let skill_counts = load_flock_skill_counts(conn, flock_ids.clone())?;
+    let skill_counts = load_flock_skill_counts(conn, ordered_flock_ids.clone())?;
 
     let flock_map = flock_rows
         .into_iter()
@@ -218,7 +341,7 @@ fn load_starred_flocks(
         .map(|row| (row.id, row))
         .collect::<HashMap<_, _>>();
 
-    flock_ids
+    ordered_flock_ids
         .into_iter()
         .filter_map(|flock_id| {
             flock_map
@@ -236,7 +359,7 @@ fn load_skill_items(
     conn: &mut PgConnection,
     ordered_skill_ids: Vec<Uuid>,
     viewer_is_staff: bool,
-) -> Result<Vec<shared::SkillListItem>, AppError> {
+) -> Result<Vec<SkillListItem>, AppError> {
     if ordered_skill_ids.is_empty() {
         return Ok(Vec::new());
     }
@@ -249,7 +372,6 @@ fn load_skill_items(
         query = query.filter(skills::moderation_status.eq("active"));
     }
     let skill_rows = query.select(SkillRow::as_select()).load::<SkillRow>(conn)?;
-    // Load owners via flocks (imported_by_user_id)
     let flock_ids: Vec<Uuid> = skill_rows
         .iter()
         .map(|row| row.flock_id)
@@ -274,7 +396,6 @@ fn load_skill_items(
             .filter_map(|row| row.latest_version_id)
             .collect::<Vec<_>>(),
     )?;
-    // Load repos for git_url (needed to derive sign)
     let repo_ids: Vec<Uuid> = skill_rows
         .iter()
         .map(|row| row.repo_id)
@@ -303,9 +424,7 @@ fn load_skill_items(
             let owner = owners
                 .get(&owner_user_id)
                 .ok_or_else(|| AppError::Internal("missing skill owner".to_string()))?;
-            let latest = row
-                .latest_version_id
-                .and_then(|id| latest_versions.get(&id));
+            let latest = row.latest_version_id.and_then(|id| latest_versions.get(&id));
             let git_url = repo_map
                 .get(&row.repo_id)
                 .map(|r| r.git_url.as_str())
@@ -315,7 +434,7 @@ fn load_skill_items(
         .collect()
 }
 
-fn ordered_unique_ids<I>(ids: I, limit: usize) -> Vec<Uuid>
+fn ordered_unique_ids<I>(ids: I) -> Vec<Uuid>
 where
     I: IntoIterator<Item = Uuid>,
 {
@@ -324,9 +443,6 @@ where
     for id in ids {
         if seen.insert(id) {
             ordered.push(id);
-        }
-        if ordered.len() >= limit {
-            break;
         }
     }
     ordered

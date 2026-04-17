@@ -655,16 +655,21 @@ pub struct WhoAmIResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UserProfileStats {
+    pub published_skills: i64,
+    pub starred_skills: i64,
+    pub starred_flocks: i64,
+    pub history: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserProfileResponse {
     pub user: UserSummary,
     pub bio: Option<String>,
     pub joined_at: DateTime<Utc>,
     pub github_login: Option<String>,
     pub is_self: bool,
-    pub published_skills: Vec<SkillListItem>,
-    pub starred_skills: Vec<SkillListItem>,
-    pub starred_flocks: Vec<FlockSummary>,
-    pub history: Vec<BrowseHistoryItem>,
+    pub stats: UserProfileStats,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

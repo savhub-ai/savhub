@@ -175,6 +175,7 @@ pub struct T {
     pub no_starred_skills: &'static str,
     pub no_starred_flocks: &'static str,
     pub no_history_yet: &'static str,
+    pub load_more: &'static str,
 
     // -- Management --
     pub management_title: &'static str,
@@ -455,6 +456,7 @@ static EN: T = T {
     no_starred_skills: "You have not starred any skills yet.",
     no_starred_flocks: "You have not starred any flocks yet.",
     no_history_yet: "No browsing history yet.",
+    load_more: "Load more",
 
     // Management
     management_title: "Management - Savhub",
@@ -728,6 +730,7 @@ static ZH: T = T {
     no_starred_skills: "还没有收藏任何技能。",
     no_starred_flocks: "还没有收藏任何功能集。",
     no_history_yet: "还没有浏览足迹。",
+    load_more: "加载更多",
 
     // Management
     management_title: "管理 - 智汇坊",

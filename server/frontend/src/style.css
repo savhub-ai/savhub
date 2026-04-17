@@ -985,28 +985,51 @@ textarea {
   align-items: flex-start;
 }
 
-/* ── Profile page (GitHub-style left/right) ── */
+/* ── Profile page ── */
 
-.profile-layout {
+.profile-shell {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 2rem;
+  grid-template-columns: 250px minmax(0, 1fr);
+  gap: 1.5rem;
   align-items: start;
 }
 
 .profile-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 0.6rem;
+  gap: 1rem;
   position: sticky;
   top: 5rem;
 }
 
+.profile-identity-card,
+.profile-content-panel {
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 18px 40px rgba(36, 58, 33, 0.08);
+}
+
+.profile-identity-card {
+  border-radius: 24px;
+  padding: 0.85rem;
+}
+
+.profile-identity-card {
+  display: grid;
+  gap: 0.7rem;
+}
+
+.profile-identity-head {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: center;
+}
+
 .profile-avatar {
-  width: 100%;
-  max-width: 260px;
-  aspect-ratio: 1;
-  border-radius: 50%;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
   object-fit: cover;
   border: 1px solid var(--line);
   background: rgba(90, 158, 63, 0.1);
@@ -1016,83 +1039,261 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 4rem;
+  font-size: 1.45rem;
   font-weight: 800;
   color: var(--accent-strong);
   text-transform: uppercase;
 }
 
+.profile-identity-copy {
+  display: grid;
+  gap: 0.2rem;
+}
+
 .profile-display-name {
-  font-size: 1.5rem;
+  font-size: 1.15rem;
   font-weight: 700;
-  margin: 0.3rem 0 0;
-  line-height: 1.2;
+  margin: 0;
+  line-height: 1.1;
 }
 
 .profile-handle {
-  font-size: 1.1rem;
+  font-size: 0.83rem;
   color: var(--muted);
   margin: 0;
 }
 
-.profile-bio {
-  font-size: 0.92rem;
-  line-height: 1.5;
-  margin: 0.3rem 0;
-}
-
 .profile-meta-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
   gap: 0.35rem;
-  margin-top: 0.3rem;
-  padding-top: 0.6rem;
+  padding-top: 0.65rem;
   border-top: 1px solid var(--line);
 }
 
 .profile-meta-item {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
-  font-size: 0.85rem;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
 }
 
-.profile-counters {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.6rem;
-  margin-top: 0.3rem;
-  padding-top: 0.6rem;
+.profile-nav {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.7rem;
   border-top: 1px solid var(--line);
-  font-size: 0.85rem;
 }
 
-.profile-counter {
+.profile-nav-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.profile-nav-item {
+  width: 100%;
   display: flex;
   align-items: center;
-  gap: 0.2rem;
+  justify-content: space-between;
+  gap: 0.85rem;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: transparent;
+  color: var(--text);
+  padding: 0.62rem 0.8rem;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
 }
 
-.profile-counter strong {
+.profile-nav-item:hover {
+  background: rgba(90, 158, 63, 0.08);
+  border-color: rgba(90, 158, 63, 0.16);
+  transform: translateX(2px);
+}
+
+.profile-nav-item.is-active {
+  background: rgba(90, 158, 63, 0.12);
+  border-color: rgba(90, 158, 63, 0.28);
+  color: var(--accent-strong);
+}
+
+.profile-nav-label {
+  font-size: 0.88rem;
   font-weight: 700;
 }
 
-.profile-counter span {
+.profile-nav-count {
+  min-width: 2rem;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(90, 158, 63, 0.1);
   color: var(--muted);
+  text-align: center;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.profile-nav-item.is-active .profile-nav-count {
+  background: rgba(90, 158, 63, 0.18);
+  color: var(--accent-strong);
 }
 
 .profile-main {
   min-width: 0;
 }
 
-.profile-main h2 {
-  margin-top: 1.5rem;
-  margin-bottom: 0.6rem;
-  font-size: 1.1rem;
+.profile-panel-hidden {
+  display: none;
 }
 
-.profile-main h2:first-child {
-  margin-top: 0;
+.profile-content-panel {
+  border-radius: 28px;
+  overflow: hidden;
+}
+
+.profile-content-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 1rem;
+  padding: 1.35rem 1.45rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background:
+    linear-gradient(180deg, rgba(90, 158, 63, 0.06), rgba(255, 255, 255, 0)),
+    rgba(255, 255, 255, 0.3);
+}
+
+.profile-content-kicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.profile-content-title {
+  margin: 0;
+  font-size: 1.45rem;
+  line-height: 1.15;
+}
+
+.profile-content-desc {
+  margin: 0.45rem 0 0;
+  max-width: 56ch;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.profile-content-count {
+  flex: 0 0 auto;
+  min-width: 2.4rem;
+  padding: 0.35rem 0.8rem;
+  border-radius: 999px;
+  background: rgba(90, 158, 63, 0.12);
+  color: var(--accent-strong);
+  font-size: 0.95rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.profile-content-body {
+  display: grid;
+  gap: 1rem;
+  padding: 1.2rem 1.45rem 1.45rem;
+}
+
+.profile-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.profile-overview-card {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.profile-overview-card h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.profile-detail-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.profile-detail-row {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 0.8rem;
+  align-items: start;
+}
+
+.profile-detail-label {
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.profile-detail-value {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.profile-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.profile-stat-tile {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  background: rgba(90, 158, 63, 0.08);
+}
+
+.profile-stat-tile strong {
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.profile-stat-tile span {
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.profile-collection .list-view {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.profile-empty-state {
+  min-height: 240px;
+  display: grid;
+  place-items: center;
+}
+
+.profile-panel-footer {
+  display: flex;
+  justify-content: center;
+  padding-top: 0.5rem;
 }
 
 .profile-history-list {
@@ -1108,8 +1309,8 @@ textarea {
   justify-content: space-between;
   gap: 1rem;
   align-items: center;
-  padding: 0.9rem 1rem;
-  border-radius: 14px;
+  padding: 0.95rem 1rem;
+  border-radius: 18px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.58);
 }
@@ -2192,26 +2393,30 @@ code {
     justify-content: flex-start;
   }
 
-  .profile-layout {
+  .profile-shell {
     grid-template-columns: 1fr;
   }
 
   .profile-sidebar {
     position: static;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 1rem;
+  }
+
+  .profile-overview-grid {
+    grid-template-columns: 1fr;
   }
 
   .profile-avatar {
-    width: 80px;
-    max-width: 80px;
+    width: 48px;
+    height: 48px;
   }
 
   .profile-history-item {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .profile-nav-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .hero {
@@ -2233,6 +2438,27 @@ code {
   .section {
     padding: 1.15rem;
     border-radius: var(--radius-sm);
+  }
+
+  .profile-identity-card,
+  .profile-nav {
+    padding: 1rem;
+  }
+
+  .profile-content-header,
+  .profile-content-body {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  .profile-content-header {
+    flex-direction: column;
+  }
+
+  .profile-detail-row,
+  .profile-stat-grid,
+  .profile-nav-list {
+    grid-template-columns: 1fr;
   }
 
   .detail-head,

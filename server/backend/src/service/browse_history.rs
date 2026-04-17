@@ -72,7 +72,7 @@ pub fn get_history_for_user_id_with_conn(
         .load::<BrowseHistoryRow>(conn)?;
 
     Ok(BrowseHistoryResponse {
-        items: hydrate_history_items(conn, rows)?,
+        items: hydrate_history_items_for_user_page(conn, rows)?,
     })
 }
 
@@ -85,7 +85,7 @@ pub fn cleanup_old_history(conn: &mut PgConnection) -> Result<usize, AppError> {
     Ok(deleted)
 }
 
-fn hydrate_history_items(
+pub(crate) fn hydrate_history_items_for_user_page(
     conn: &mut PgConnection,
     rows: Vec<BrowseHistoryRow>,
 ) -> Result<Vec<BrowseHistoryItem>, AppError> {
