@@ -8,8 +8,8 @@ use uuid::Uuid;
 use super::helpers::{db_conn, load_users_map};
 use crate::auth::AuthContext;
 use crate::error::AppError;
-use crate::models::{BrowseHistoryRow, FlockRow, NewBrowseHistoryRow, SkillRow};
-use crate::schema::{browse_histories, flocks, skills};
+use crate::models::{BrowseHistoryRow, FlockRow, NewBrowseHistoryRow, RepoRow, SkillRow};
+use crate::schema::{browse_histories, flocks, repos, skills};
 
 /// Record a page view. Upserts: if the same user+resource already exists,
 /// update the viewed_at timestamp instead of inserting a duplicate.
@@ -103,6 +103,11 @@ pub(crate) fn hydrate_history_items_for_user_page(
         .filter(|row| row.resource_type == "flock")
         .map(|row| row.resource_id)
         .collect::<Vec<_>>();
+    let repo_ids = rows
+        .iter()
+        .filter(|row| row.resource_type == "repo")
+        .map(|row| row.resource_id)
+        .collect::<Vec<_>>();
 
     let skill_rows = if skill_ids.is_empty() {
         Vec::new()
@@ -120,6 +125,14 @@ pub(crate) fn hydrate_history_items_for_user_page(
             .select(FlockRow::as_select())
             .load::<FlockRow>(conn)?
     };
+    let repo_rows = if repo_ids.is_empty() {
+        Vec::new()
+    } else {
+        repos::table
+            .filter(repos::id.eq_any(&repo_ids))
+            .select(RepoRow::as_select())
+            .load::<RepoRow>(conn)?
+    };
 
     let user_ids = flock_rows
         .iter()
@@ -129,35 +142,37 @@ pub(crate) fn hydrate_history_items_for_user_page(
 
     let skill_map = skill_rows
         .into_iter()
-        .map(|row| (row.id, row))
+        .map(|row| (row.id, (row.slug, row.name)))
         .collect::<HashMap<_, _>>();
     let flock_map = flock_rows
         .into_iter()
-        .map(|row| (row.id, row))
+        .map(|row| {
+            let owner_handle = users
+                .get(&row.imported_by_user_id)
+                .map(|user| user.handle.clone());
+            (row.id, (row.slug, row.name, owner_handle))
+        })
+        .collect::<HashMap<_, _>>();
+    let repo_map = repo_rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.id,
+                (super::helpers::derive_repo_sign(&row.git_url), row.name),
+            )
+        })
         .collect::<HashMap<_, _>>();
 
     Ok(rows
         .into_iter()
         .map(|row| {
-            let (resource_slug, resource_title, owner_handle) = match row.resource_type.as_str() {
-                "skill" => skill_map
-                    .get(&row.resource_id)
-                    .map(|skill| (skill.slug.clone(), skill.name.clone(), None))
-                    .unwrap_or_else(|| (String::new(), String::new(), None)),
-                "flock" => flock_map
-                    .get(&row.resource_id)
-                    .map(|flock| {
-                        (
-                            flock.slug.clone(),
-                            flock.name.clone(),
-                            users
-                                .get(&flock.imported_by_user_id)
-                                .map(|user| user.handle.clone()),
-                        )
-                    })
-                    .unwrap_or_else(|| (String::new(), String::new(), None)),
-                _ => (String::new(), String::new(), None),
-            };
+            let (resource_slug, resource_title, owner_handle) = history_item_fields(
+                &row.resource_type,
+                row.resource_id,
+                &skill_map,
+                &flock_map,
+                &repo_map,
+            );
 
             BrowseHistoryItem {
                 resource_type: row.resource_type,
@@ -169,4 +184,56 @@ pub(crate) fn hydrate_history_items_for_user_page(
             }
         })
         .collect())
+}
+
+fn history_item_fields(
+    resource_type: &str,
+    resource_id: Uuid,
+    skill_map: &HashMap<Uuid, (String, String)>,
+    flock_map: &HashMap<Uuid, (String, String, Option<String>)>,
+    repo_map: &HashMap<Uuid, (String, String)>,
+) -> (String, String, Option<String>) {
+    match resource_type {
+        "skill" => skill_map
+            .get(&resource_id)
+            .map(|(slug, title)| (slug.clone(), title.clone(), None))
+            .unwrap_or_else(|| (String::new(), String::new(), None)),
+        "flock" => flock_map
+            .get(&resource_id)
+            .map(|(slug, title, owner_handle)| (slug.clone(), title.clone(), owner_handle.clone()))
+            .unwrap_or_else(|| (String::new(), String::new(), None)),
+        "repo" => repo_map
+            .get(&resource_id)
+            .map(|(slug, title)| (slug.clone(), title.clone(), None))
+            .unwrap_or_else(|| (String::new(), String::new(), None)),
+        _ => (String::new(), String::new(), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::history_item_fields;
+    use std::collections::HashMap;
+    use uuid::Uuid;
+
+    #[test]
+    fn history_item_fields_populates_repo_entries() {
+        let resource_id = Uuid::now_v7();
+        let skill_map = HashMap::new();
+        let flock_map = HashMap::new();
+        let repo_map = HashMap::from([(
+            resource_id,
+            (
+                "github.com/chrislearn/plugins".to_string(),
+                "plugins".to_string(),
+            ),
+        )]);
+
+        let (slug, title, owner_handle) =
+            history_item_fields("repo", resource_id, &skill_map, &flock_map, &repo_map);
+
+        assert_eq!(slug, "github.com/chrislearn/plugins");
+        assert_eq!(title, "plugins");
+        assert_eq!(owner_handle, None);
+    }
 }
