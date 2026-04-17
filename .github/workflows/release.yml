@@ -201,17 +201,14 @@ jobs:
 
       - name: Install WiX Toolset
         shell: pwsh
+        env:
+          WIX_VERSION: 6.0.2
         run: |
-          dotnet tool install -g wix
+          dotnet tool install -g wix --version $env:WIX_VERSION
           $wixVersionText = wix --version
           Write-Host "WiX version: $wixVersionText"
-          if ($wixVersionText -match "(\d+\.\d+\.\d+)") {
-            $wixVersion = $Matches[1]
-          } else {
-            throw "Could not parse WiX version from '$wixVersionText'"
-          }
-          wix extension add -g "WixToolset.UI.wixext/$wixVersion"
-          wix extension add -g "WixToolset.Util.wixext/$wixVersion"
+          wix extension add -g "WixToolset.UI.wixext/$env:WIX_VERSION"
+          wix extension add -g "WixToolset.Util.wixext/$env:WIX_VERSION"
           wix extension list -g
 
       - name: Extract and build MSI
