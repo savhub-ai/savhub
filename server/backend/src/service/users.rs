@@ -140,7 +140,8 @@ pub fn get_user_published_skills(
         .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
         .unwrap_or(false);
     let skill_ids = published_skill_ids_for_user(&mut conn, context.user.id)?;
-    let (page_ids, next_cursor) = paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let (page_ids, next_cursor) =
+        paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
     let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
     Ok(PagedResponse { items, next_cursor })
 }
@@ -162,7 +163,8 @@ pub fn get_user_starred_skills(
         .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
         .unwrap_or(false);
     let skill_ids = starred_skill_ids_for_user(&mut conn, context.user.id)?;
-    let (page_ids, next_cursor) = paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let (page_ids, next_cursor) =
+        paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
     let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
     Ok(PagedResponse { items, next_cursor })
 }
@@ -181,7 +183,8 @@ pub fn get_user_starred_flocks(
         ));
     }
     let flock_ids = starred_flock_ids_for_user(&mut conn, context.user.id)?;
-    let (page_ids, next_cursor) = paginate_unique_ids(flock_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
+    let (page_ids, next_cursor) =
+        paginate_unique_ids(flock_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
     let items = load_flock_items(&mut conn, page_ids)?;
     Ok(PagedResponse { items, next_cursor })
 }
@@ -256,7 +259,10 @@ fn published_skill_ids_for_user(
     Ok(ordered_unique_ids(ids))
 }
 
-fn starred_skill_ids_for_user(conn: &mut PgConnection, user_id: Uuid) -> Result<Vec<Uuid>, AppError> {
+fn starred_skill_ids_for_user(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
     let ids = skill_stars::table
         .filter(skill_stars::user_id.eq(user_id))
         .filter(skill_stars::skill_id.is_not_null())
@@ -269,7 +275,10 @@ fn starred_skill_ids_for_user(conn: &mut PgConnection, user_id: Uuid) -> Result<
     Ok(ordered_unique_ids(ids))
 }
 
-fn starred_flock_ids_for_user(conn: &mut PgConnection, user_id: Uuid) -> Result<Vec<Uuid>, AppError> {
+fn starred_flock_ids_for_user(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, AppError> {
     let ids = skill_stars::table
         .filter(skill_stars::user_id.eq(user_id))
         .filter(skill_stars::skill_id.is_null())
@@ -424,7 +433,9 @@ fn load_skill_items(
             let owner = owners
                 .get(&owner_user_id)
                 .ok_or_else(|| AppError::Internal("missing skill owner".to_string()))?;
-            let latest = row.latest_version_id.and_then(|id| latest_versions.get(&id));
+            let latest = row
+                .latest_version_id
+                .and_then(|id| latest_versions.get(&id));
             let git_url = repo_map
                 .get(&row.repo_id)
                 .map(|r| r.git_url.as_str())

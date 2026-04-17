@@ -739,12 +739,8 @@ async fn get_user_starred_skills(req: &mut Request, res: &mut Response) {
     let auth = optional_auth(req).ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match users::get_user_starred_skills(
-        &handle,
-        auth.as_ref().map(|ctx| &ctx.user),
-        limit,
-        cursor,
-    ) {
+    match users::get_user_starred_skills(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor)
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -756,12 +752,8 @@ async fn get_user_starred_flocks(req: &mut Request, res: &mut Response) {
     let auth = optional_auth(req).ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match users::get_user_starred_flocks(
-        &handle,
-        auth.as_ref().map(|ctx| &ctx.user),
-        limit,
-        cursor,
-    ) {
+    match users::get_user_starred_flocks(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor)
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
