@@ -212,9 +212,11 @@ fn history_item_fields(
 
 #[cfg(test)]
 mod tests {
-    use super::history_item_fields;
     use std::collections::HashMap;
+
     use uuid::Uuid;
+
+    use super::history_item_fields;
 
     #[test]
     fn history_item_fields_populates_repo_entries() {
