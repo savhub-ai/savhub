@@ -339,7 +339,13 @@ async fn resolve_skill(req: &mut Request, res: &mut Response) {
 
 #[handler]
 async fn download_bundle(req: &mut Request, res: &mut Response) {
-    let slug = req.query::<String>("slug").unwrap_or_default();
+    let slug = match require_query(req, "slug") {
+        Ok(v) => v,
+        Err(error) => {
+            render_error(res, error);
+            return;
+        }
+    };
     let version = req.query::<String>("version");
     let tag = req.query::<String>("tag");
     let kind = req
@@ -524,7 +530,13 @@ async fn get_skill_file(req: &mut Request, res: &mut Response) {
             return;
         }
     };
-    let path = req.query::<String>("path").unwrap_or_default();
+    let path = match require_query(req, "path") {
+        Ok(v) => v,
+        Err(error) => {
+            render_error(res, error);
+            return;
+        }
+    };
     let version = req.query::<String>("version");
     let tag = req.query::<String>("tag");
     let auth = optional_auth(req).ok().flatten();
@@ -843,6 +855,17 @@ fn parse_uuid_param(req: &Request, name: &str, error_message: &str) -> Result<Uu
     req.param::<String>(name)
         .and_then(|value| Uuid::parse_str(&value).ok())
         .ok_or_else(|| AppError::BadRequest(error_message.to_string()))
+}
+
+fn require_query(req: &Request, name: &str) -> Result<String, AppError> {
+    let raw = req.query::<String>(name).unwrap_or_default();
+    if raw.trim().is_empty() {
+        Err(AppError::BadRequest(format!(
+            "{name} query parameter is required"
+        )))
+    } else {
+        Ok(raw)
+    }
 }
 
 #[handler]

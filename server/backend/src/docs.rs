@@ -27,20 +27,26 @@ static SITES: Lazy<DocSites> = Lazy::new(|| {
         .title("Savhub Docs")
         .base("/docs/en/")
         .build()
-        .expect("failed to build EN docs");
-    println!("[docs] EN site built with {} pages:", en.pages().len());
-    for page in en.pages() {
-        println!("[docs]   route={:?}", page.route.route_path);
-    }
+        .unwrap_or_else(|err| {
+            tracing::error!(
+                "failed to build EN docs from embedded ../../docs/en/: {err}. \
+                 Verify the docs directory is present at build time."
+            );
+            panic!("failed to build EN docs: {err}");
+        });
+    tracing::info!("[docs] EN site built with {} pages", en.pages().len());
     let zh = EmbedNovel::<DocsZh>::new()
         .title("Savhub 文档")
         .base("/docs/zh/")
         .build()
-        .expect("failed to build ZH docs");
-    println!("[docs] ZH site built with {} pages:", zh.pages().len());
-    for page in zh.pages() {
-        println!("[docs]   route={:?}", page.route.route_path);
-    }
+        .unwrap_or_else(|err| {
+            tracing::error!(
+                "failed to build ZH docs from embedded ../../docs/zh/: {err}. \
+                 Verify the docs directory is present at build time."
+            );
+            panic!("failed to build ZH docs: {err}");
+        });
+    tracing::info!("[docs] ZH site built with {} pages", zh.pages().len());
     DocSites { en, zh }
 });
 

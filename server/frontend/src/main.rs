@@ -1,7 +1,13 @@
 mod api;
 mod app;
+mod contexts;
 mod i18n;
 pub mod icons;
+mod location;
+mod pages;
+mod storage;
+mod urls;
+mod ws;
 
 #[cfg(target_arch = "wasm32")]
 fn main() {

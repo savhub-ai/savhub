@@ -2371,8 +2371,14 @@ code {
 }
 
 /* ── Responsive ──────────────────────────────── */
+/*
+ * Breakpoint policy:
+ *   - 640px : single phone-width tweaks (component-level)
+ *   - 768px : phone → tablet — collapse multi-column to single column
+ *   - 1024px: tablet → small desktop — adapt nav, sidebar, hero
+ */
 
-@media (max-width: 960px) {
+@media (max-width: 1024px) {
   .topbar {
     flex-wrap: wrap;
   }
@@ -2424,7 +2430,7 @@ code {
   }
 }
 
-@media (max-width: 720px) {
+@media (max-width: 768px) {
   .page {
     width: min(100vw - 1rem, 100%);
     padding: 1rem 0 1rem;
@@ -2789,7 +2795,7 @@ code {
   padding-left: 1.4rem;
 }
 
-@media (max-width: 900px) {
+@media (max-width: 1024px) {
   .docs-layout {
     grid-template-columns: 1fr;
   }

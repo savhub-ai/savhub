@@ -148,6 +148,18 @@ pub struct FetchedSkillInfo {
     pub local_path: PathBuf,
 }
 
+/// Search-result entry that preserves `repo_url` (unlike `RegistrySkill`),
+/// so callers can fetch the skill without an extra detail round-trip.
+#[derive(Debug, Clone)]
+pub struct SkillSearchEntry {
+    pub slug: String,
+    pub path: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub repo_url: String,
+    pub version: Option<String>,
+}
+
 fn repos_dir() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("repos"))
 }
@@ -525,6 +537,41 @@ pub fn list_skills(
 pub fn search_skills(query: &str, limit: usize) -> Result<Vec<RegistrySkill>> {
     let (skills, _) = list_skills(Some(query), None, 0, limit)?;
     Ok(skills)
+}
+
+/// Search registry skills, preserving `repo_url` and `path` so callers can
+/// fetch a chosen entry without a follow-up detail request.
+pub fn search_skill_entries(query: &str, limit: usize) -> Result<Vec<SkillSearchEntry>> {
+    let client = RegistryApiClient::new()?;
+    let query = if query.trim().is_empty() {
+        None
+    } else {
+        Some(query)
+    };
+    let (items, _) = fetch_skill_page(&client, query, 0, limit)?;
+    Ok(items
+        .into_iter()
+        .map(|item| SkillSearchEntry {
+            slug: item.slug,
+            path: item.path,
+            name: item.display_name,
+            description: item.summary,
+            repo_url: item.repo_url,
+            version: item.latest_version.map(|value| value.version),
+        })
+        .collect())
+}
+
+/// Search registry flocks by query (server-side filter).
+pub fn search_flocks(query: &str, limit: usize) -> Result<Vec<RegistryFlock>> {
+    let client = RegistryApiClient::new()?;
+    let query = if query.trim().is_empty() {
+        None
+    } else {
+        Some(query)
+    };
+    let (items, _) = fetch_flock_page(&client, query, 0, limit)?;
+    Ok(items.into_iter().map(registry_flock_from_summary).collect())
 }
 
 pub fn list_flocks() -> Result<Vec<RegistryFlock>> {

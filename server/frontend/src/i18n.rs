@@ -251,6 +251,8 @@ pub struct T {
     // -- Not found --
     pub not_found_title: &'static str,
     pub not_found: &'static str,
+    pub not_found_detail_prefix: &'static str,
+    pub not_found_detail_suffix: &'static str,
 
     // -- Metadata --
     pub metadata: &'static str,
@@ -295,6 +297,7 @@ pub struct T {
     pub err_timeout: &'static str,
     pub err_network: &'static str,
     pub err_server: &'static str,
+    pub err_unexpected: &'static str,
 }
 
 pub fn translations(lang: Lang) -> &'static T {
@@ -532,6 +535,8 @@ static EN: T = T {
     // Not found
     not_found_title: "Not Found - Savhub",
     not_found: "Not found",
+    not_found_detail_prefix: "No route matched ",
+    not_found_detail_suffix: ".",
 
     // Metadata
     metadata: "Metadata",
@@ -563,11 +568,11 @@ static EN: T = T {
 
     // Relative time
     just_now: "just now",
-    time_m_ago: "m ago",
-    time_h_ago: "h ago",
+    time_m_ago: "min ago",
+    time_h_ago: "hr ago",
     time_d_ago: "d ago",
     time_mo_ago: "mo ago",
-    time_y_ago: "y ago",
+    time_y_ago: "yr ago",
 
     // Friendly errors
     err_session_expired: "Your session expired. Please sign in again.",
@@ -576,6 +581,7 @@ static EN: T = T {
     err_timeout: "Request timed out. Please check your connection.",
     err_network: "Network error. Please check your connection.",
     err_server: "Server error. Please try again later.",
+    err_unexpected: "Something went wrong. Please try again.",
 };
 
 static ZH: T = T {
@@ -639,7 +645,7 @@ static ZH: T = T {
     community: "社区",
     maintainers: "维护者",
     links: "链接",
-    flocks: "功能集",
+    flocks: "技能集",
 
     // Flock detail
     indexed_skills: "已索引技能",
@@ -725,10 +731,10 @@ static ZH: T = T {
     published_skills: "发布过的技能",
     no_published_skills: "还没有发布过技能。",
     starred_skills: "收藏的技能",
-    starred_flocks: "收藏的功能集",
+    starred_flocks: "收藏的技能集",
     recent_history: "历史足迹",
     no_starred_skills: "还没有收藏任何技能。",
-    no_starred_flocks: "还没有收藏任何功能集。",
+    no_starred_flocks: "还没有收藏任何技能集。",
     no_history_yet: "还没有浏览足迹。",
     load_more: "加载更多",
 
@@ -804,8 +810,10 @@ static ZH: T = T {
     add_rule_desc_placeholder: "规则说明",
 
     // Not found
-    not_found_title: "未找到 - 智汇坊",
+    not_found_title: "未找到 - Savhub",
     not_found: "未找到",
+    not_found_detail_prefix: "没有匹配的路由 ",
+    not_found_detail_suffix: "。",
 
     // Metadata
     metadata: "元数据",
@@ -826,7 +834,7 @@ static ZH: T = T {
     index_cloning: "克隆仓库",
     index_scanning: "扫描技能",
     index_categorizing: "分类技能",
-    index_persisting: "保存功能集",
+    index_persisting: "保存技能集",
     index_finalizing: "完成中",
     index_done: "完成",
 
@@ -850,4 +858,5 @@ static ZH: T = T {
     err_timeout: "请求超时。请检查网络连接。",
     err_network: "网络错误。请检查网络连接。",
     err_server: "服务器错误。请稍后重试。",
+    err_unexpected: "出现异常。请稍后重试。",
 };

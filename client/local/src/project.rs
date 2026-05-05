@@ -702,6 +702,121 @@ pub fn enable_fetched_skill_in_project(
     })
 }
 
+/// Manually attach a flock from the central fetched cache to this project.
+///
+/// Adds `repo_url:flock_path` to `flocks.manual_added` (so it survives `apply`)
+/// and copies every skill in the flock from `~/.savhub/repos/...` into each
+/// detected AI client's project skill directory. The lockfile is updated for
+/// every skill that materialised on disk; missing repo cache entries are
+/// reported back to the caller as a warning list rather than a hard error.
+pub fn enable_fetched_flock_in_project(
+    workdir: &Path,
+    repo_url: &str,
+    flock_slug: &str,
+) -> Result<Vec<String>> {
+    let repo_url = repo_url.trim();
+    let flock_slug = flock_slug.trim();
+    if repo_url.is_empty() || flock_slug.is_empty() {
+        bail!("invalid flock identifier");
+    }
+
+    let central_lock = {
+        let central = crate::config::get_config_dir()?;
+        crate::skills::read_lockfile(&central)?
+    };
+    let flock_skills = central_lock
+        .repos
+        .iter()
+        .find(|repo| repo.git_url == repo_url)
+        .and_then(|repo| {
+            repo.flocks
+                .iter()
+                .find(|flock| flock.path == flock_slug)
+        });
+
+    let token = format!("{repo_url}:{flock_slug}");
+    let mut config = read_project_config(workdir)?;
+    if !config.flocks.manual_added.iter().any(|f| f == &token) {
+        config.flocks.manual_added.push(token.clone());
+    }
+    config
+        .flocks
+        .manual_skipped
+        .retain(|entry| entry != &token && entry != flock_slug);
+    write_project_config_force(workdir, &config)?;
+
+    let mut warnings = Vec::new();
+    let Some(flock_entry) = flock_skills else {
+        warnings.push(format!(
+            "flock `{flock_slug}` is not present in the local cache; run `savhub fetch` for one of its skills first"
+        ));
+        return Ok(warnings);
+    };
+
+    let stripped = repo_url
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .strip_prefix("https://")
+        .or_else(|| {
+            repo_url
+                .trim_end_matches('/')
+                .trim_end_matches(".git")
+                .strip_prefix("http://")
+        })
+        .unwrap_or(repo_url);
+    let central = crate::config::get_config_dir()?;
+    let repo_root = central.join("repos").join(stripped);
+
+    let fetched_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    for entry in &flock_entry.skills {
+        let source = repo_root.join(&entry.path);
+        if !source.is_dir() {
+            warnings.push(format!(
+                "skill `{}` cache missing at {}",
+                entry.slug,
+                source.display()
+            ));
+            continue;
+        }
+        let version_info = read_skill_version_info(&source).unwrap_or_default();
+        for dir in installed_client_skills_dirs(workdir) {
+            let target = dir.join(&entry.slug);
+            fs::create_dir_all(&dir)?;
+            copy_skill_folder(&source, &target)?;
+            let _ = write_repo_skill_origin(
+                &target,
+                &RepoSkillOrigin {
+                    version: 1,
+                    repo: repo_url.to_string(),
+                    repo_sign: repo_url.to_string(),
+                    repo_commit: version_info.git_sha.clone(),
+                    slug: entry.slug.clone(),
+                    skill_version: version_info.version.clone(),
+                    fetched_at,
+                },
+            );
+        }
+
+        let mut lock = read_project_lockfile(workdir).unwrap_or_default();
+        if !lock.skills.iter().any(|s| s.slug == entry.slug) {
+            lock.skills.push(ProjectLockedSkill {
+                repo: Some(repo_url.to_string()),
+                path: Some(entry.path.clone()),
+                slug: entry.slug.clone(),
+                version: version_info.version.clone(),
+                git_sha: version_info.git_sha.clone(),
+            });
+            write_project_lockfile_force(workdir, &lock)?;
+        }
+    }
+
+    Ok(warnings)
+}
+
 pub fn disable_project_skill(workdir: &Path, slug: &str) -> Result<bool> {
     let slug = sanitize_slug(slug);
     if slug.is_empty() {

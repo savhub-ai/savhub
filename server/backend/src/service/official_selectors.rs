@@ -7,8 +7,12 @@ use shared::OfficialSelectorsResponse;
 /// derived from the SHA-256 hash so clients can do conditional fetches.
 static OFFICIAL_SELECTORS: Lazy<SelectorPayload> = Lazy::new(|| {
     let raw = include_str!("../../../../official_selectors.json");
-    let parsed: serde_json::Value =
-        serde_json::from_str(raw).expect("official_selectors.json is not valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(raw).unwrap_or_else(|err| {
+        // Embedded at compile time from official_selectors.json — if this fails
+        // the binary itself is broken, log details before crashing.
+        tracing::error!("official_selectors.json failed to parse at startup: {err}");
+        panic!("official_selectors.json is not valid JSON: {err}");
+    });
     let selectors_array = parsed
         .get("selectors")
         .and_then(|v| v.as_array())
@@ -25,8 +29,10 @@ static OFFICIAL_SELECTORS: Lazy<SelectorPayload> = Lazy::new(|| {
         etag: Some(etag.clone()),
         selectors: selectors_array,
     };
-    let json =
-        serde_json::to_string(&response).expect("failed to serialise official selectors response");
+    let json = serde_json::to_string(&response).unwrap_or_else(|err| {
+        tracing::error!("failed to serialise official selectors response: {err}");
+        panic!("failed to serialise official selectors response: {err}");
+    });
 
     SelectorPayload { json, etag }
 });

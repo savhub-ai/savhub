@@ -1288,39 +1288,12 @@ pub fn run_selectors(project_root: &Path) -> Result<SelectorRunResult> {
     // Sort by priority descending (higher priority first)
     matched.sort_by(|a, b| b.selector.priority.cmp(&a.selector.priority));
 
-    // Merge skills with priority-based conflict resolution
-    // Higher-priority selector's skills come first and take precedence
-    let mut seen_skills = std::collections::BTreeSet::new();
-    let mut skills = Vec::new();
-    for m in &matched {
-        for skill in &m.skills {
-            if seen_skills.insert(skill.clone()) {
-                skills.push(skill.clone());
-            }
-        }
-    }
-
-    // Merge flocks (order by priority, deduplicate)
-    let mut seen_flocks = std::collections::BTreeSet::new();
-    let mut flocks = Vec::new();
-    for m in &matched {
-        for flock in &m.flocks {
-            if seen_flocks.insert(flock.clone()) {
-                flocks.push(flock.clone());
-            }
-        }
-    }
-
-    // Merge repos (order by priority, deduplicate by git_url)
-    let mut seen_repos = std::collections::BTreeSet::new();
-    let mut repos = Vec::new();
-    for m in &matched {
-        for repo in &m.repos {
-            if seen_repos.insert(repo.git_url.clone()) {
-                repos.push(repo.clone());
-            }
-        }
-    }
+    // Higher-priority selector's items come first and take precedence over duplicates.
+    let skills = dedup_concat(matched.iter().flat_map(|m| m.skills.iter()), |s| s.clone());
+    let flocks = dedup_concat(matched.iter().flat_map(|m| m.flocks.iter()), |f| f.clone());
+    let repos = dedup_concat(matched.iter().flat_map(|m| m.repos.iter()), |r| {
+        r.git_url.clone()
+    });
 
     Ok(SelectorRunResult {
         matched,
@@ -1328,6 +1301,26 @@ pub fn run_selectors(project_root: &Path) -> Result<SelectorRunResult> {
         flocks,
         repos,
     })
+}
+
+/// Walk `items` in order, keeping the first occurrence of each unique key.
+/// Used by `run_selectors` to merge skills/flocks/repos across matched
+/// selectors while preserving priority order.
+fn dedup_concat<'a, T, K, I, F>(items: I, key_fn: F) -> Vec<T>
+where
+    T: Clone + 'a,
+    K: Ord,
+    I: Iterator<Item = &'a T>,
+    F: Fn(&T) -> K,
+{
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for item in items {
+        if seen.insert(key_fn(item)) {
+            out.push(item.clone());
+        }
+    }
+    out
 }
 
 #[allow(dead_code)]

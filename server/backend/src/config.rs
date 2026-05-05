@@ -1,8 +1,9 @@
 use std::env;
+use std::fmt;
 
 use anyhow::{Context, Result};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
     pub bind: String,
@@ -43,6 +44,47 @@ pub struct Config {
 impl Config {
     pub fn repo_checkout_base_path(&self) -> std::path::PathBuf {
         std::path::PathBuf::from(&self.space_path).join("repos")
+    }
+}
+
+fn redact(value: &str) -> &'static str {
+    if value.is_empty() { "<unset>" } else { "<redacted>" }
+}
+
+fn redact_opt(value: Option<&String>) -> &'static str {
+    match value {
+        Some(v) if !v.is_empty() => "<redacted>",
+        _ => "<unset>",
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("database_url", &redact(&self.database_url))
+            .field("bind", &self.bind)
+            .field("frontend_origin", &self.frontend_origin)
+            .field("api_base", &self.api_base)
+            .field("space_path", &self.space_path)
+            .field("github_client_id", &self.github_client_id)
+            .field("github_client_secret", &redact(&self.github_client_secret))
+            .field("github_redirect_url", &self.github_redirect_url)
+            .field("github_admin_logins", &self.github_admin_logins)
+            .field("github_moderator_logins", &self.github_moderator_logins)
+            .field("sync_interval_secs", &self.sync_interval_secs)
+            .field("sync_stale_hours", &self.sync_stale_hours)
+            .field("ai_provider", &self.ai_provider)
+            .field("ai_api_key", &redact_opt(self.ai_api_key.as_ref()))
+            .field("ai_api_url", &self.ai_api_url)
+            .field("ai_chat_model", &self.ai_chat_model)
+            .field("ai_security_model", &self.ai_security_model)
+            .field("auto_index_min_interval_secs", &self.auto_index_min_interval_secs)
+            .field("max_parallel_index_jobs", &self.max_parallel_index_jobs)
+            .field("ai_security_scan_enabled", &self.ai_security_scan_enabled)
+            .field("ai_chat_concurrency", &self.ai_chat_concurrency)
+            .field("ai_security_concurrency", &self.ai_security_concurrency)
+            .field("static_scan_concurrency", &self.static_scan_concurrency)
+            .finish()
     }
 }
 

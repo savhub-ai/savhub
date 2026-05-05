@@ -5,8 +5,8 @@ use dioxus::prelude::*;
 use savhub_local::config::{add_project, read_projects_list, remove_project};
 use savhub_local::project::{
     ProjectSelectorMatch, ResolvedProjectSkill, ResolvedSkillSources, disable_project_skill,
-    enable_fetched_skill_in_project, read_project_selector_matches,
-    resolve_project_skills_with_sources,
+    enable_fetched_flock_in_project, enable_fetched_skill_in_project,
+    read_project_selector_matches, resolve_project_skills_with_sources,
 };
 
 fn strip_url_scheme(url: &str) -> &str {
@@ -231,6 +231,7 @@ fn ProjectDetail(project_path: String, mut version: Signal<u32>) -> Element {
     let state = use_context::<AppState>();
     let t = i18n::texts(*state.lang.read());
     let mut show_add_skill_dialog = use_signal(|| false);
+    let mut show_add_flock_dialog = use_signal(|| false);
     let mut show_rescan_modal = use_signal(|| false);
     let mut selectors_page = use_signal(|| 0usize);
     let mut effective_skills_page = use_signal(|| 0usize);
@@ -368,6 +369,11 @@ fn ProjectDetail(project_path: String, mut version: Signal<u32>) -> Element {
                                     on_next: move |_| effective_skills_page.set(effective_skills_current_page + 1),
                                 }
                                 button {
+                                    style: "padding: 6px 12px; background: {Theme::BG_ELEVATED}; color: {Theme::TEXT}; border: 1px solid {Theme::LINE}; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;",
+                                    onclick: move |_| show_add_flock_dialog.set(true),
+                                    "{t.project_inject_flock}"
+                                }
+                                button {
                                     style: "padding: 6px 12px; background: linear-gradient(135deg, {Theme::ACCENT} 0%, #7bc25a 100%); color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;",
                                     onclick: move |_| show_add_skill_dialog.set(true),
                                     "{t.project_inject_skill}"
@@ -449,6 +455,16 @@ fn ProjectDetail(project_path: String, mut version: Signal<u32>) -> Element {
                             on_close: move |_| show_add_skill_dialog.set(false),
                         }
                     }
+
+                    if *show_add_flock_dialog.read() {
+                        AddProjectFlockDialog {
+                            project_path: project_path.clone(),
+                            version: version,
+                            flocks: data.flock_options.clone(),
+                            already_added_tokens: data.added_flock_tokens.clone(),
+                            on_close: move |_| show_add_flock_dialog.set(false),
+                        }
+                    }
                 }
             }
         } else {
@@ -464,13 +480,18 @@ struct ProjectDetailData {
     selector_matches: Vec<ProjectSelectorMatch>,
     effective_skills: Vec<ResolvedProjectSkill>,
     repo_skills: Vec<RepoSkillOption>,
+    flock_options: Vec<RepoFlockOption>,
+    added_flock_tokens: Vec<String>,
 }
 
 fn load_project_detail_data(workdir: &Path) -> ProjectDetailData {
+    let cfg = savhub_local::project::read_project_config(workdir).unwrap_or_default();
     ProjectDetailData {
         selector_matches: read_project_selector_matches(workdir).unwrap_or_default(),
         effective_skills: resolve_project_skills_with_sources(workdir).unwrap_or_default(),
         repo_skills: collect_repo_skill_options(workdir),
+        flock_options: collect_repo_flock_options(),
+        added_flock_tokens: cfg.flocks.manual_added.clone(),
     }
 }
 
@@ -501,6 +522,39 @@ fn collect_repo_skill_options(_workdir: &Path) -> Vec<RepoSkillOption> {
         a.flock_slug
             .cmp(&b.flock_slug)
             .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    options
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct RepoFlockOption {
+    repo_url: String,
+    flock_slug: String,
+    skill_count: usize,
+    token: String,
+}
+
+fn collect_repo_flock_options() -> Vec<RepoFlockOption> {
+    let savhub_dir = savhub_local::config::get_config_dir()
+        .unwrap_or_else(|_| savhub_local::clients::home_dir().join(".savhub"));
+    let lock = savhub_local::skills::read_lockfile(&savhub_dir).unwrap_or_default();
+    let mut options: Vec<RepoFlockOption> = lock
+        .repos
+        .iter()
+        .flat_map(|repo| {
+            let repo_url = repo.git_url.clone();
+            repo.flocks.iter().map(move |flock| RepoFlockOption {
+                repo_url: repo_url.clone(),
+                flock_slug: flock.path.clone(),
+                skill_count: flock.skills.len(),
+                token: format!("{}:{}", repo_url, flock.path),
+            })
+        })
+        .collect();
+    options.sort_by(|a, b| {
+        a.repo_url
+            .cmp(&b.repo_url)
+            .then_with(|| a.flock_slug.cmp(&b.flock_slug))
     });
     options
 }
@@ -774,6 +828,144 @@ fn AddProjectSkillDialog(
                                                     }
                                                 },
                                                 "{add_label}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn AddProjectFlockDialog(
+    project_path: String,
+    mut version: Signal<u32>,
+    flocks: Vec<RepoFlockOption>,
+    already_added_tokens: Vec<String>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let state = use_context::<AppState>();
+    let t = i18n::texts(*state.lang.read());
+    let added: BTreeSet<String> = already_added_tokens.into_iter().collect();
+    let mut status_msg = use_signal(|| Option::<String>::None);
+    let mut backdrop_pressed = use_signal(|| false);
+    let mut search_query = use_signal(String::new);
+
+    let query = search_query.read().trim().to_lowercase();
+    let filtered: Vec<&RepoFlockOption> = flocks
+        .iter()
+        .filter(|flock| {
+            if query.is_empty() {
+                return true;
+            }
+            flock.flock_slug.to_lowercase().contains(&query)
+                || flock.repo_url.to_lowercase().contains(&query)
+        })
+        .collect();
+
+    rsx! {
+        div {
+            style: "position: fixed; inset: 0; background: rgba(26, 46, 24, 0.38); display: flex; align-items: center; justify-content: center; padding: 24px; z-index: 1000;",
+            onmousedown: move |_| backdrop_pressed.set(true),
+            onmouseup: move |_| { if *backdrop_pressed.read() { on_close.call(()); } backdrop_pressed.set(false); },
+            div {
+                style: "width: 100%; max-width: 720px; max-height: 80vh; display: flex; flex-direction: column; background: {Theme::PANEL}; border: 1px solid {Theme::LINE}; border-radius: 12px; box-shadow: 0 24px 64px rgba(26, 46, 24, 0.18); padding: 20px;",
+                onmousedown: move |evt| evt.stop_propagation(),
+                onmouseup: move |evt| evt.stop_propagation(),
+
+                div { style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; flex-shrink: 0;",
+                    h2 { style: "font-size: 18px; font-weight: 700; color: {Theme::TEXT}; white-space: nowrap;",
+                        "{t.project_local_flocks_title}"
+                    }
+                    div { style: "flex: 1; min-width: 0;",
+                        input {
+                            r#type: "text",
+                            placeholder: t.search_placeholder,
+                            style: "width: 100%; padding: 7px 12px; background: {Theme::BG_ELEVATED}; border: 1px solid {Theme::LINE}; border-radius: 8px; font-size: 13px; color: {Theme::TEXT}; outline: none;",
+                            value: "{search_query}",
+                            oninput: move |evt| search_query.set(evt.value()),
+                        }
+                    }
+                    button {
+                        style: "width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; background: transparent; border: 1px solid {Theme::LINE}; border-radius: 8px; font-size: 16px; color: {Theme::MUTED}; cursor: pointer;",
+                        onclick: move |_| on_close.call(()),
+                        crate::icons::LucideIcon { icon: crate::icons::Icon::X, size: 14 }
+                    }
+                }
+
+                if let Some(message) = status_msg.read().as_ref() {
+                    p { style: "font-size: 12px; color: {Theme::DANGER}; margin-bottom: 12px; flex-shrink: 0;",
+                        "{message}"
+                    }
+                }
+
+                if filtered.is_empty() {
+                    p { style: "font-size: 13px; color: {Theme::MUTED};",
+                        "{t.project_local_flocks_empty}"
+                    }
+                } else {
+                    div { style: "display: flex; flex-direction: column; gap: 10px; overflow-y: auto; flex: 1; min-height: 0;",
+                        for flock in filtered.iter() {
+                            {
+                                let token = flock.token.clone();
+                                let repo_display = strip_url_scheme(&flock.repo_url).to_string();
+                                let slug = flock.flock_slug.clone();
+                                let count = flock.skill_count;
+                                let already = added.contains(&token);
+                                let pp = project_path.clone();
+                                let repo_url = flock.repo_url.clone();
+                                let slug_for_apply = slug.clone();
+                                rsx! {
+                                    div { style: "display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; background: {Theme::BG_ELEVATED}; border: 1px solid {Theme::LINE}; border-radius: 8px;",
+                                        div { style: "min-width: 0; flex: 1;",
+                                            p { style: "font-size: 14px; font-weight: 600; color: {Theme::TEXT}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;",
+                                                "{slug}"
+                                            }
+                                            p { style: "font-size: 11px; color: {Theme::MUTED}; margin-top: 2px; font-family: Consolas, 'SFMono-Regular', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;",
+                                                "{repo_display}"
+                                            }
+                                            p { style: "font-size: 11px; color: {Theme::MUTED}; margin-top: 2px;",
+                                                "{count} skills"
+                                            }
+                                        }
+                                        div { style: "display: flex; align-items: center; gap: 8px; flex-shrink: 0;",
+                                            if already {
+                                                span { style: "font-size: 11px; font-weight: 600; color: {Theme::ACCENT_STRONG};",
+                                                    "{t.fetched}"
+                                                }
+                                            }
+                                            button {
+                                                style: "padding: 6px 12px; background: linear-gradient(135deg, #6aa84f 0%, #7bc25a 100%); color: white; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; white-space: nowrap;",
+                                                onclick: move |_| {
+                                                    let pp = pp.clone();
+                                                    let repo_url = repo_url.clone();
+                                                    let slug = slug_for_apply.clone();
+                                                    spawn(async move {
+                                                        let result = tokio::task::spawn_blocking(move || {
+                                                            let wd = PathBuf::from(&pp);
+                                                            enable_fetched_flock_in_project(&wd, &repo_url, &slug)
+                                                        }).await;
+                                                        match result {
+                                                            Ok(Ok(warnings)) => {
+                                                                if warnings.is_empty() {
+                                                                    status_msg.set(None);
+                                                                } else {
+                                                                    status_msg.set(Some(warnings.join("; ")));
+                                                                }
+                                                                version.with_mut(|value| *value += 1);
+                                                                on_close.call(());
+                                                            }
+                                                            Ok(Err(error)) => status_msg.set(Some(error.to_string())),
+                                                            Err(error) => status_msg.set(Some(error.to_string())),
+                                                        }
+                                                    });
+                                                },
+                                                "{t.project_inject_flock}"
                                             }
                                         }
                                     }

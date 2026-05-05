@@ -41,11 +41,22 @@ pub fn get_custom_selectors(auth: &AuthContext) -> Result<CustomSelectorsRespons
     }
 }
 
+/// Maximum number of custom selector entries a single user may store.
+/// Keeps the DB row size bounded and prevents accidental/abusive bulk uploads.
+const MAX_CUSTOM_SELECTORS_PER_USER: usize = 200;
+
 /// Upsert the authenticated user's custom selectors.
 pub fn save_custom_selectors(
     auth: &AuthContext,
     request: SaveCustomSelectorsRequest,
 ) -> Result<CustomSelectorsResponse, AppError> {
+    if request.selectors.len() > MAX_CUSTOM_SELECTORS_PER_USER {
+        return Err(AppError::BadRequest(format!(
+            "too many selectors: {} (max {MAX_CUSTOM_SELECTORS_PER_USER})",
+            request.selectors.len()
+        )));
+    }
+
     let mut conn = db_conn()?;
     let now = Utc::now();
     let selectors_json = Value::Array(request.selectors.clone());
