@@ -1,7 +1,6 @@
 use chrono::Utc;
 use diesel::dsl::count_star;
 use diesel::prelude::*;
-use diesel_async::scoped_futures::ScopedFutureExt;
 use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
 use shared::{
@@ -41,34 +40,31 @@ pub async fn add_skill_comment(
         return Err(AppError::BadRequest("comment body is required".to_string()));
     }
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            diesel::insert_into(skill_comments::table)
-                .values(NewSkillCommentRow {
-                    id: Uuid::now_v7(),
-                    skill_id: Some(skill.id),
-                    repo_id: skill.repo_id,
-                    flock_id: skill.flock_id,
-                    user_id: auth.user.id,
-                    body: body.to_string(),
-                    soft_deleted_at: None,
-                    created_at: Utc::now(),
-                })
-                .execute(conn)
-                .await?;
-            refresh_skill_stats(conn, skill.id).await?;
-            insert_audit_log(
-                conn,
-                Some(auth.user.id),
-                "skill.comment.create",
-                "skill",
-                Some(skill.id),
-                json!({ "skill_id": skill_id }),
-            )
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        diesel::insert_into(skill_comments::table)
+            .values(NewSkillCommentRow {
+                id: Uuid::now_v7(),
+                skill_id: Some(skill.id),
+                repo_id: skill.repo_id,
+                flock_id: skill.flock_id,
+                user_id: auth.user.id,
+                body: body.to_string(),
+                soft_deleted_at: None,
+                created_at: Utc::now(),
+            })
+            .execute(conn)
             .await?;
-            fetch_skill_comments(conn, skill.id, Some(&auth.user)).await
-        }
-        .scope_boxed()
+        refresh_skill_stats(conn, skill.id).await?;
+        insert_audit_log(
+            conn,
+            Some(auth.user.id),
+            "skill.comment.create",
+            "skill",
+            Some(skill.id),
+            json!({ "skill_id": skill_id }),
+        )
+        .await?;
+        fetch_skill_comments(conn, skill.id, Some(&auth.user)).await
     })
     .await
 }
@@ -88,39 +84,36 @@ pub async fn delete_skill_comment(
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("skill `{skill_id}` does not exist")))?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            let deleted = diesel::update(
-                skill_comments::table
-                    .filter(skill_comments::id.eq(comment_id))
-                    .filter(skill_comments::skill_id.eq(skill.id))
-                    .filter(skill_comments::soft_deleted_at.is_null()),
-            )
-            .set(skill_comments::soft_deleted_at.eq(Some(Utc::now())))
-            .execute(conn)
-            .await?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let deleted = diesel::update(
+            skill_comments::table
+                .filter(skill_comments::id.eq(comment_id))
+                .filter(skill_comments::skill_id.eq(skill.id))
+                .filter(skill_comments::soft_deleted_at.is_null()),
+        )
+        .set(skill_comments::soft_deleted_at.eq(Some(Utc::now())))
+        .execute(conn)
+        .await?;
 
-            if deleted == 0 {
-                return Err(AppError::NotFound("comment not found".to_string()));
-            }
-
-            refresh_skill_stats(conn, skill.id).await?;
-            insert_audit_log(
-                conn,
-                Some(auth.user.id),
-                "skill.comment.delete",
-                "skill_comment",
-                Some(comment_id),
-                json!({ "skill_id": skill.id }),
-            )
-            .await?;
-
-            Ok(AdminActionResponse {
-                ok: true,
-                message: "Comment removed.".to_string(),
-            })
+        if deleted == 0 {
+            return Err(AppError::NotFound("comment not found".to_string()));
         }
-        .scope_boxed()
+
+        refresh_skill_stats(conn, skill.id).await?;
+        insert_audit_log(
+            conn,
+            Some(auth.user.id),
+            "skill.comment.delete",
+            "skill_comment",
+            Some(comment_id),
+            json!({ "skill_id": skill.id }),
+        )
+        .await?;
+
+        Ok(AdminActionResponse {
+            ok: true,
+            message: "Comment removed.".to_string(),
+        })
     })
     .await
 }
@@ -139,43 +132,40 @@ pub async fn toggle_skill_star(
         .ok_or_else(|| AppError::NotFound(format!("skill `{skill_id}` does not exist")))?;
     ensure_skill_visible(&skill, Some(&auth.user))?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            let existing = skill_stars::table
-                .filter(skill_stars::skill_id.eq(skill.id))
-                .filter(skill_stars::user_id.eq(auth.user.id))
-                .select(SkillStarRow::as_select())
-                .first::<SkillStarRow>(conn)
-                .await
-                .optional()?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let existing = skill_stars::table
+            .filter(skill_stars::skill_id.eq(skill.id))
+            .filter(skill_stars::user_id.eq(auth.user.id))
+            .select(SkillStarRow::as_select())
+            .first::<SkillStarRow>(conn)
+            .await
+            .optional()?;
 
-            let starred = if let Some(existing) = existing {
-                diesel::delete(skill_stars::table.find(existing.id))
-                    .execute(conn)
-                    .await?;
-                false
-            } else {
-                diesel::insert_into(skill_stars::table)
-                    .values(NewSkillStarRow {
-                        id: Uuid::now_v7(),
-                        skill_id: Some(skill.id),
-                        repo_id: skill.repo_id,
-                        flock_id: skill.flock_id,
-                        user_id: auth.user.id,
-                        created_at: Utc::now(),
-                    })
-                    .execute(conn)
-                    .await?;
-                true
-            };
-            refresh_skill_stats(conn, skill.id).await?;
-            Ok(ToggleStarResponse {
-                ok: true,
-                stars: current_skill_star_count(conn, skill.id).await?,
-                starred,
-            })
-        }
-        .scope_boxed()
+        let starred = if let Some(existing) = existing {
+            diesel::delete(skill_stars::table.find(existing.id))
+                .execute(conn)
+                .await?;
+            false
+        } else {
+            diesel::insert_into(skill_stars::table)
+                .values(NewSkillStarRow {
+                    id: Uuid::now_v7(),
+                    skill_id: Some(skill.id),
+                    repo_id: skill.repo_id,
+                    flock_id: skill.flock_id,
+                    user_id: auth.user.id,
+                    created_at: Utc::now(),
+                })
+                .execute(conn)
+                .await?;
+            true
+        };
+        refresh_skill_stats(conn, skill.id).await?;
+        Ok(ToggleStarResponse {
+            ok: true,
+            stars: current_skill_star_count(conn, skill.id).await?,
+            starred,
+        })
     })
     .await
 }
@@ -190,44 +180,41 @@ pub async fn toggle_flock_star(
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
     let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            let existing = skill_stars::table
-                .filter(skill_stars::flock_id.eq(flock.id))
-                .filter(skill_stars::skill_id.is_null())
-                .filter(skill_stars::user_id.eq(auth.user.id))
-                .select(SkillStarRow::as_select())
-                .first::<SkillStarRow>(conn)
-                .await
-                .optional()?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let existing = skill_stars::table
+            .filter(skill_stars::flock_id.eq(flock.id))
+            .filter(skill_stars::skill_id.is_null())
+            .filter(skill_stars::user_id.eq(auth.user.id))
+            .select(SkillStarRow::as_select())
+            .first::<SkillStarRow>(conn)
+            .await
+            .optional()?;
 
-            let starred = if let Some(existing) = existing {
-                diesel::delete(skill_stars::table.find(existing.id))
-                    .execute(conn)
-                    .await?;
-                false
-            } else {
-                diesel::insert_into(skill_stars::table)
-                    .values(NewSkillStarRow {
-                        id: Uuid::now_v7(),
-                        flock_id: flock.id,
-                        repo_id: flock.repo_id,
-                        skill_id: None,
-                        user_id: auth.user.id,
-                        created_at: Utc::now(),
-                    })
-                    .execute(conn)
-                    .await?;
-                true
-            };
-            refresh_flock_stats(conn, flock.id).await?;
-            Ok(ToggleStarResponse {
-                ok: true,
-                stars: current_flock_star_count(conn, flock.id).await?,
-                starred,
-            })
-        }
-        .scope_boxed()
+        let starred = if let Some(existing) = existing {
+            diesel::delete(skill_stars::table.find(existing.id))
+                .execute(conn)
+                .await?;
+            false
+        } else {
+            diesel::insert_into(skill_stars::table)
+                .values(NewSkillStarRow {
+                    id: Uuid::now_v7(),
+                    flock_id: flock.id,
+                    repo_id: flock.repo_id,
+                    skill_id: None,
+                    user_id: auth.user.id,
+                    created_at: Utc::now(),
+                })
+                .execute(conn)
+                .await?;
+            true
+        };
+        refresh_flock_stats(conn, flock.id).await?;
+        Ok(ToggleStarResponse {
+            ok: true,
+            stars: current_flock_star_count(conn, flock.id).await?,
+            starred,
+        })
     })
     .await
 }
@@ -344,8 +331,7 @@ pub async fn add_flock_comment(
         return Err(AppError::BadRequest("comment body is required".to_string()));
     }
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
+    conn.transaction::<_, AppError, _>(async move |conn| {
             diesel::insert_into(skill_comments::table)
                 .values(NewSkillCommentRow {
                     id: Uuid::now_v7(),
@@ -370,8 +356,6 @@ pub async fn add_flock_comment(
             )
             .await?;
             fetch_flock_comments(conn, flock.id, Some(&auth.user)).await
-        }
-        .scope_boxed()
     })
     .await
 }
@@ -388,44 +372,41 @@ pub async fn delete_flock_comment(
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
     let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            let deleted = diesel::update(
-                skill_comments::table
-                    .filter(skill_comments::id.eq(comment_id))
-                    .filter(skill_comments::flock_id.eq(flock.id))
-                    .filter(skill_comments::skill_id.is_null())
-                    .filter(skill_comments::soft_deleted_at.is_null()),
-            )
-            .set(skill_comments::soft_deleted_at.eq(Some(Utc::now())))
-            .execute(conn)
-            .await?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let deleted = diesel::update(
+            skill_comments::table
+                .filter(skill_comments::id.eq(comment_id))
+                .filter(skill_comments::flock_id.eq(flock.id))
+                .filter(skill_comments::skill_id.is_null())
+                .filter(skill_comments::soft_deleted_at.is_null()),
+        )
+        .set(skill_comments::soft_deleted_at.eq(Some(Utc::now())))
+        .execute(conn)
+        .await?;
 
-            if deleted == 0 {
-                return Err(AppError::NotFound("comment not found".to_string()));
-            }
-
-            refresh_flock_stats(conn, flock.id).await?;
-            insert_audit_log(
-                conn,
-                Some(auth.user.id),
-                "flock.comment.delete",
-                "flock_comment",
-                Some(comment_id),
-                json!({
-                    "repo": format!("{}/{}", repo_domain, repo_path_slug),
-                    "flock_slug": flock_slug,
-                    "flock_id": flock.id
-                }),
-            )
-            .await?;
-
-            Ok(AdminActionResponse {
-                ok: true,
-                message: "Comment removed.".to_string(),
-            })
+        if deleted == 0 {
+            return Err(AppError::NotFound("comment not found".to_string()));
         }
-        .scope_boxed()
+
+        refresh_flock_stats(conn, flock.id).await?;
+        insert_audit_log(
+            conn,
+            Some(auth.user.id),
+            "flock.comment.delete",
+            "flock_comment",
+            Some(comment_id),
+            json!({
+                "repo": format!("{}/{}", repo_domain, repo_path_slug),
+                "flock_slug": flock_slug,
+                "flock_id": flock.id
+            }),
+        )
+        .await?;
+
+        Ok(AdminActionResponse {
+            ok: true,
+            message: "Comment removed.".to_string(),
+        })
     })
     .await
 }
@@ -479,64 +460,61 @@ pub async fn rate_flock(
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
     let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            let existing = skill_ratings::table
-                .filter(skill_ratings::flock_id.eq(flock.id))
-                .filter(skill_ratings::user_id.eq(auth.user.id))
-                .select(SkillRatingRow::as_select())
-                .first::<SkillRatingRow>(conn)
-                .await
-                .optional()?;
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        let existing = skill_ratings::table
+            .filter(skill_ratings::flock_id.eq(flock.id))
+            .filter(skill_ratings::user_id.eq(auth.user.id))
+            .select(SkillRatingRow::as_select())
+            .first::<SkillRatingRow>(conn)
+            .await
+            .optional()?;
 
-            if let Some(existing) = existing {
-                diesel::update(skill_ratings::table.find(existing.id))
-                    .set((
-                        skill_ratings::score.eq(request.score),
-                        skill_ratings::updated_at.eq(Utc::now()),
-                    ))
-                    .execute(conn)
-                    .await?;
-            } else {
-                let now = Utc::now();
-                diesel::insert_into(skill_ratings::table)
-                    .values(NewSkillRatingRow {
-                        id: Uuid::now_v7(),
-                        flock_id: flock.id,
-                        repo_id: flock.repo_id,
-                        user_id: auth.user.id,
-                        score: request.score,
-                        created_at: now,
-                        updated_at: now,
-                    })
-                    .execute(conn)
-                    .await?;
-            }
-
-            let stats = compute_flock_rating_stats(conn, flock.id).await?;
-            refresh_flock_stats(conn, flock.id).await?;
-
-            insert_audit_log(
-                conn,
-                Some(auth.user.id),
-                "flock.rate",
-                "flock",
-                Some(flock.id),
-                json!({
-                    "repo": format!("{}/{}", repo_domain, repo_path_slug),
-                    "flock_slug": flock_slug,
-                    "score": request.score,
-                }),
-            )
-            .await?;
-
-            Ok(RateFlockResponse {
-                ok: true,
-                score: request.score,
-                stats,
-            })
+        if let Some(existing) = existing {
+            diesel::update(skill_ratings::table.find(existing.id))
+                .set((
+                    skill_ratings::score.eq(request.score),
+                    skill_ratings::updated_at.eq(Utc::now()),
+                ))
+                .execute(conn)
+                .await?;
+        } else {
+            let now = Utc::now();
+            diesel::insert_into(skill_ratings::table)
+                .values(NewSkillRatingRow {
+                    id: Uuid::now_v7(),
+                    flock_id: flock.id,
+                    repo_id: flock.repo_id,
+                    user_id: auth.user.id,
+                    score: request.score,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .execute(conn)
+                .await?;
         }
-        .scope_boxed()
+
+        let stats = compute_flock_rating_stats(conn, flock.id).await?;
+        refresh_flock_stats(conn, flock.id).await?;
+
+        insert_audit_log(
+            conn,
+            Some(auth.user.id),
+            "flock.rate",
+            "flock",
+            Some(flock.id),
+            json!({
+                "repo": format!("{}/{}", repo_domain, repo_path_slug),
+                "flock_slug": flock_slug,
+                "score": request.score,
+            }),
+        )
+        .await?;
+
+        Ok(RateFlockResponse {
+            ok: true,
+            score: request.score,
+            stats,
+        })
     })
     .await
 }
@@ -645,27 +623,24 @@ pub async fn record_skill_install(
             ))
         })?;
 
-    conn.transaction::<_, AppError, _>(|conn| {
-        async move {
-            diesel::insert_into(skill_installs::table)
-                .values(crate::models::NewSkillInstallRow {
-                    id: Uuid::now_v7(),
-                    skill_id: skill.id,
-                    flock_id: skill.flock_id,
-                    user_id,
-                    client_type: client_type.to_string(),
-                    created_at: Utc::now(),
-                })
-                .execute(conn)
-                .await?;
-            refresh_skill_install_stats(conn, skill.id).await?;
-            refresh_flock_install_stats(conn, skill.flock_id).await?;
-            Ok(AdminActionResponse {
-                ok: true,
-                message: "Install recorded.".to_string(),
+    conn.transaction::<_, AppError, _>(async move |conn| {
+        diesel::insert_into(skill_installs::table)
+            .values(crate::models::NewSkillInstallRow {
+                id: Uuid::now_v7(),
+                skill_id: skill.id,
+                flock_id: skill.flock_id,
+                user_id,
+                client_type: client_type.to_string(),
+                created_at: Utc::now(),
             })
-        }
-        .scope_boxed()
+            .execute(conn)
+            .await?;
+        refresh_skill_install_stats(conn, skill.id).await?;
+        refresh_flock_install_stats(conn, skill.flock_id).await?;
+        Ok(AdminActionResponse {
+            ok: true,
+            message: "Install recorded.".to_string(),
+        })
     })
     .await
 }

@@ -47,7 +47,7 @@ diesel = { version = "2.3", features = [
     "postgres", "chrono", "uuid", "serde_json", "64-column-tables",
 ] }
 # C2: all runtime DB access uses diesel-async + a bb8 connection pool.
-diesel-async = { version = "0.8", features = ["postgres", "bb8"] }
+diesel-async = { version = "0.9", features = ["postgres", "bb8"] }
 diesel_migrations = "2.3"
 dotenvy = "0.15"
 futures-util = "0.3"
