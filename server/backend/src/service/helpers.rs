@@ -3,6 +3,7 @@ use std::io::Write;
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use shared::{
@@ -173,15 +174,16 @@ pub fn sign_to_git_url(domain: &str, path_slug: &str) -> String {
     format!("https://{domain}/{path_slug}.git")
 }
 
-pub fn db_conn() -> Result<crate::db::PgPooledConnection, AppError> {
+pub async fn db_conn() -> Result<crate::db::AsyncPgPooledConnection, AppError> {
     app_state()
-        .pool
+        .async_pool
         .get()
+        .await
         .map_err(|error| AppError::Internal(error.to_string()))
 }
 
-pub fn fetch_skill_by_path(
-    conn: &mut PgConnection,
+pub async fn fetch_skill_by_path(
+    conn: &mut AsyncPgConnection,
     repo_url: &str,
     path: &str,
 ) -> Result<Option<SkillRow>, AppError> {
@@ -189,6 +191,7 @@ pub fn fetch_skill_by_path(
         .filter(repos::git_url.eq(repo_url))
         .select(repos::id)
         .first::<Uuid>(conn)
+        .await
         .optional()?;
     let Some(repo_id) = repo_id else {
         return Ok(None);
@@ -199,12 +202,13 @@ pub fn fetch_skill_by_path(
         .filter(skills::soft_deleted_at.is_null())
         .select(SkillRow::as_select())
         .first::<SkillRow>(conn)
+        .await
         .optional()
         .map_err(Into::into)
 }
 
-pub fn fetch_skill_by_slug(
-    conn: &mut PgConnection,
+pub async fn fetch_skill_by_slug(
+    conn: &mut AsyncPgConnection,
     slug_value: &str,
 ) -> Result<Option<SkillRow>, AppError> {
     skills::table
@@ -212,12 +216,13 @@ pub fn fetch_skill_by_slug(
         .filter(skills::soft_deleted_at.is_null())
         .select(SkillRow::as_select())
         .first::<SkillRow>(conn)
+        .await
         .optional()
         .map_err(Into::into)
 }
 
-pub fn fetch_flock_by_path(
-    conn: &mut PgConnection,
+pub async fn fetch_flock_by_path(
+    conn: &mut AsyncPgConnection,
     repo_url: &str,
     path: &str,
 ) -> Result<FlockRow, AppError> {
@@ -225,6 +230,7 @@ pub fn fetch_flock_by_path(
         .filter(repos::git_url.eq(repo_url))
         .select(repos::id)
         .first::<Uuid>(conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("repo `{repo_url}` does not exist")))?;
     flocks::table
@@ -233,6 +239,7 @@ pub fn fetch_flock_by_path(
         .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
         .first::<FlockRow>(conn)
+        .await
         .optional()?
         .ok_or_else(|| {
             AppError::NotFound(format!(
@@ -241,16 +248,17 @@ pub fn fetch_flock_by_path(
         })
 }
 
-pub fn fetch_owner(conn: &mut PgConnection, user_id: Uuid) -> Result<UserRow, AppError> {
+pub async fn fetch_owner(conn: &mut AsyncPgConnection, user_id: Uuid) -> Result<UserRow, AppError> {
     users::table
         .find(user_id)
         .select(UserRow::as_select())
         .first::<UserRow>(conn)
+        .await
         .map_err(Into::into)
 }
 
-pub fn load_users_map(
-    conn: &mut PgConnection,
+pub async fn load_users_map(
+    conn: &mut AsyncPgConnection,
     ids: Vec<Uuid>,
 ) -> Result<HashMap<Uuid, UserRow>, AppError> {
     if ids.is_empty() {
@@ -259,11 +267,12 @@ pub fn load_users_map(
     let rows = users::table
         .filter(users::id.eq_any(ids))
         .select(UserRow::as_select())
-        .load::<UserRow>(conn)?;
+        .load::<UserRow>(conn)
+        .await?;
     Ok(rows.into_iter().map(|row| (row.id, row)).collect())
 }
-pub fn load_skill_versions_map(
-    conn: &mut PgConnection,
+pub async fn load_skill_versions_map(
+    conn: &mut AsyncPgConnection,
     ids: Vec<Uuid>,
 ) -> Result<HashMap<Uuid, SkillVersionRow>, AppError> {
     if ids.is_empty() {
@@ -272,12 +281,13 @@ pub fn load_skill_versions_map(
     let rows = skill_versions::table
         .filter(skill_versions::id.eq_any(ids))
         .select(SkillVersionRow::as_select())
-        .load::<SkillVersionRow>(conn)?;
+        .load::<SkillVersionRow>(conn)
+        .await?;
     Ok(rows.into_iter().map(|row| (row.id, row)).collect())
 }
 
-pub fn fetch_skill_versions(
-    conn: &mut PgConnection,
+pub async fn fetch_skill_versions(
+    conn: &mut AsyncPgConnection,
     skill_id: Uuid,
     viewer: Option<&RequestUser>,
 ) -> Result<Vec<SkillVersionRow>, AppError> {
@@ -291,6 +301,7 @@ pub fn fetch_skill_versions(
         .order(skill_versions::created_at.desc())
         .select(SkillVersionRow::as_select())
         .load::<SkillVersionRow>(conn)
+        .await
         .map_err(Into::into)
 }
 
@@ -396,8 +407,8 @@ pub fn resolve_latest_skill_version<'a>(
         .or_else(|| versions.first())
 }
 
-pub fn locate_skill_version(
-    conn: &mut PgConnection,
+pub async fn locate_skill_version(
+    conn: &mut AsyncPgConnection,
     skill: &SkillRow,
     version: Option<&str>,
     tag: Option<&str>,
@@ -409,16 +420,19 @@ pub fn locate_skill_version(
             .filter(skill_versions::version.eq(version))
             .select(SkillVersionRow::as_select())
             .first::<SkillVersionRow>(conn)
+            .await
             .map_err(Into::into);
     }
     if let Some(tag) = tag {
         let tags = parse_tag_map(&skill.tags);
         let version = tags
             .get(tag)
-            .ok_or_else(|| AppError::NotFound(format!("tag `{tag}` not found")))?;
-        return locate_skill_version(conn, skill, Some(version), None, viewer);
+            .ok_or_else(|| AppError::NotFound(format!("tag `{tag}` not found")))?
+            .clone();
+        return Box::pin(locate_skill_version(conn, skill, Some(&version), None, viewer)).await;
     }
-    fetch_skill_versions(conn, skill.id, viewer)?
+    fetch_skill_versions(conn, skill.id, viewer)
+        .await?
         .into_iter()
         .next()
         .ok_or_else(|| AppError::NotFound("no versions available".to_string()))
@@ -593,8 +607,8 @@ pub fn parse_moderation_status(value: &str) -> ModerationStatus {
     }
 }
 
-pub fn insert_audit_log(
-    conn: &mut PgConnection,
+pub async fn insert_audit_log(
+    conn: &mut AsyncPgConnection,
     actor_user_id: Option<Uuid>,
     action: &str,
     target_type: &str,
@@ -611,7 +625,8 @@ pub fn insert_audit_log(
             metadata,
             created_at: Utc::now(),
         })
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(())
 }
 

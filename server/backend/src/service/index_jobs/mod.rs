@@ -5,6 +5,8 @@ use std::fs;
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::scoped_futures::ScopedFutureExt;
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use discovery::{
     compute_each_dir_as_flock_plans, compute_flock_group_plans, derive_flock_name,
     extract_repo_description, extract_repo_name, join_repo_relative_path,
@@ -38,8 +40,8 @@ use crate::state::app_state;
 /// Check if we already have a **successful** AI request cached for this
 /// (task_type, target_id, commit_sha) combination. Failed requests are
 /// ignored so they get retried on the next index.
-fn has_cached_ai_request(
-    conn: &mut PgConnection,
+async fn has_cached_ai_request(
+    conn: &mut AsyncPgConnection,
     task_type: &str,
     target_id: Uuid,
     commit_sha: &str,
@@ -51,14 +53,15 @@ fn has_cached_ai_request(
         .filter(ai_request_cache::success.eq(true))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0
 }
 
 /// Record an AI request result. On conflict (same task+target+commit),
 /// update success/error so a retry after a failure overwrites the old record.
-fn cache_ai_request(
-    conn: &mut PgConnection,
+async fn cache_ai_request(
+    conn: &mut AsyncPgConnection,
     task_type: &str,
     target_type: &str,
     target_id: Uuid,
@@ -88,23 +91,25 @@ fn cache_ai_request(
             ai_request_cache::error_message.eq(error_message),
             ai_request_cache::created_at.eq(Utc::now()),
         ))
-        .execute(conn);
+        .execute(conn)
+        .await;
 }
 
 /// Check whether the given user is a site admin.
-fn is_site_admin(conn: &mut PgConnection, user_id: Uuid) -> bool {
+async fn is_site_admin(conn: &mut AsyncPgConnection, user_id: Uuid) -> bool {
     use crate::schema::site_admins;
     site_admins::table
         .filter(site_admins::user_id.eq(user_id))
         .count()
         .get_result::<i64>(conn)
+        .await
         .unwrap_or(0)
         > 0
 }
 
 /// Find an existing completed scan job with the same git_url and commit_sha.
-fn find_existing_index(
-    conn: &mut PgConnection,
+async fn find_existing_index(
+    conn: &mut AsyncPgConnection,
     git_url: &str,
     git_ref: &str,
     git_subdir: &str,
@@ -128,13 +133,14 @@ fn find_existing_index(
     let row = query
         .select(IndexJobRow::as_select())
         .first::<IndexJobRow>(&mut *conn)
+        .await
         .optional()?;
     Ok(row)
 }
 
 /// Find an active (pending/running) scan job with the given url_hash.
-fn find_active_index_by_url_hash(
-    conn: &mut PgConnection,
+async fn find_active_index_by_url_hash(
+    conn: &mut AsyncPgConnection,
     url_hash: &str,
 ) -> Result<Option<IndexJobRow>, AppError> {
     let row = index_jobs::table
@@ -143,12 +149,16 @@ fn find_active_index_by_url_hash(
         .order(index_jobs::created_at.desc())
         .select(IndexJobRow::as_select())
         .first::<IndexJobRow>(conn)
+        .await
         .optional()?;
     Ok(row)
 }
 
 /// Mark an active job as superseded and notify WS subscribers.
-pub(crate) fn supersede_index_job(conn: &mut PgConnection, job_id: Uuid) -> Result<(), AppError> {
+pub(crate) async fn supersede_index_job(
+    conn: &mut AsyncPgConnection,
+    job_id: Uuid,
+) -> Result<(), AppError> {
     diesel::update(index_jobs::table.find(job_id))
         .set(IndexJobChangeset {
             status: Some("superseded".to_string()),
@@ -157,7 +167,8 @@ pub(crate) fn supersede_index_job(conn: &mut PgConnection, job_id: Uuid) -> Resu
             progress_message: Some("Superseded by newer scan".to_string()),
             ..Default::default()
         })
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     let _ = app_state()
         .events_tx
         .send(crate::state::WsEvent::IndexProgress {
@@ -186,8 +197,9 @@ pub async fn submit_index(
 
     // Only admins may set force=true
     let is_admin = {
-        let mut conn = db_conn()?;
-        matches!(auth.user.role, shared::UserRole::Admin) || is_site_admin(&mut conn, auth.user.id)
+        let mut conn = db_conn().await?;
+        matches!(auth.user.role, shared::UserRole::Admin)
+            || is_site_admin(&mut conn, auth.user.id).await
     };
     let force = request.force && is_admin;
     println!(
@@ -197,7 +209,7 @@ pub async fn submit_index(
 
     // Resolve the remote ref to a commit SHA before creating the job
     let commit_sha = resolve_remote_sha(&git_url, &request.git_ref).await?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     // Check for an existing completed scan with the same url + sha
     if !force
@@ -208,7 +220,8 @@ pub async fn submit_index(
             &request.git_subdir,
             request.repo_slug.as_deref(),
             &commit_sha,
-        )?
+        )
+        .await?
     {
         println!(
             "[index] skipping duplicate scan for {} @ {} (existing job {})",
@@ -223,7 +236,7 @@ pub async fn submit_index(
     }
 
     // Smart dedup: check for active (pending/running) job with same url_hash
-    if !force && let Some(active) = find_active_index_by_url_hash(&mut conn, &url_hash)? {
+    if !force && let Some(active) = find_active_index_by_url_hash(&mut conn, &url_hash).await? {
         if active.git_sha == commit_sha {
             // Same commit — return existing job
             println!(
@@ -242,7 +255,7 @@ pub async fn submit_index(
                 "[index] superseding active job {} for {} (old={} new={})",
                 active.id, git_url, &active.git_sha, commit_sha
             );
-            supersede_index_job(&mut conn, active.id)?;
+            supersede_index_job(&mut conn, active.id).await?;
         }
     }
 
@@ -271,7 +284,8 @@ pub async fn submit_index(
             force_index: force,
             url_hash: Some(url_hash),
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     Ok(SubmitIndexResponse {
         ok: true,
@@ -281,12 +295,13 @@ pub async fn submit_index(
     })
 }
 
-pub fn get_index_job(auth: &AuthContext, job_id: Uuid) -> Result<IndexJobDto, AppError> {
-    let mut conn = db_conn()?;
+pub async fn get_index_job(auth: &AuthContext, job_id: Uuid) -> Result<IndexJobDto, AppError> {
+    let mut conn = db_conn().await?;
     let row = index_jobs::table
         .find(job_id)
         .select(IndexJobRow::as_select())
         .first::<IndexJobRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("scan job not found".to_string()))?;
 
@@ -304,12 +319,12 @@ pub fn get_index_job(auth: &AuthContext, job_id: Uuid) -> Result<IndexJobDto, Ap
     Ok(index_job_dto_from_row(&row))
 }
 
-pub fn list_index_jobs(
+pub async fn list_index_jobs(
     auth: &AuthContext,
     limit: i64,
     offset: i64,
 ) -> Result<IndexJobListResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let capped_limit = limit.min(100);
     let rows = index_jobs::table
         .filter(index_jobs::requested_by_user_id.eq(auth.user.id))
@@ -317,7 +332,8 @@ pub fn list_index_jobs(
         .offset(offset.max(0))
         .limit(capped_limit + 1) // fetch one extra to detect has_more
         .select(IndexJobRow::as_select())
-        .load::<IndexJobRow>(&mut conn)?;
+        .load::<IndexJobRow>(&mut conn)
+        .await?;
 
     let has_more = rows.len() as i64 > capped_limit;
     let jobs: Vec<_> = rows
@@ -330,12 +346,15 @@ pub fn list_index_jobs(
 }
 
 pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
-    let pool = &app_state().pool;
+    let pool = &app_state().async_pool;
     let config = &app_state().config;
 
     // Mark running
     {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(index_jobs::table.find(job_id))
             .set(IndexJobChangeset {
                 status: Some("running".to_string()),
@@ -345,7 +364,8 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
                 progress_message: Some("Starting…".to_string()),
                 ..Default::default()
             })
-            .execute(&mut conn)?;
+            .execute(&mut conn)
+            .await?;
         let _ = app_state()
             .events_tx
             .send(crate::state::WsEvent::IndexProgress {
@@ -360,11 +380,15 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
 
     // Load the job
     let job = {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         index_jobs::table
             .find(job_id)
             .select(IndexJobRow::as_select())
-            .first::<IndexJobRow>(&mut conn)?
+            .first::<IndexJobRow>(&mut conn)
+            .await?
     };
 
     // ── Freshness check ──
@@ -382,8 +406,11 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
                     new_sha = %current_sha,
                     "repo has newer commits — superseding and re-queuing"
                 );
-                let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
-                supersede_index_job(&mut conn, job_id)?;
+                let mut conn = pool
+                    .get()
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
+                supersede_index_job(&mut conn, job_id).await?;
                 // Create a replacement job targeting the latest commit
                 let now = Utc::now();
                 let new_job_id = Uuid::now_v7();
@@ -409,7 +436,8 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
                         force_index: job.force_index,
                         url_hash: job.url_hash.clone(),
                     })
-                    .execute(&mut conn)?;
+                    .execute(&mut conn)
+            .await?;
                 tracing::info!(
                     old_job_id = %job_id,
                     new_job_id = %new_job_id,
@@ -432,7 +460,10 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
 
     match do_auto_import(&job, config).await {
         Ok(result_data) => {
-            let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             diesel::update(index_jobs::table.find(job_id))
                 .set(IndexJobChangeset {
                     status: Some("completed".to_string()),
@@ -443,7 +474,8 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
                     progress_message: Some("Done".to_string()),
                     ..Default::default()
                 })
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
             let _ = app_state()
                 .events_tx
                 .send(crate::state::WsEvent::IndexProgress {
@@ -457,7 +489,10 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
         }
         Err(error) => {
             let err_msg = error.to_string();
-            let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
             diesel::update(index_jobs::table.find(job_id))
                 .set(IndexJobChangeset {
                     status: Some("failed".to_string()),
@@ -468,7 +503,8 @@ pub async fn execute_auto_import(job_id: Uuid) -> Result<(), AppError> {
                     progress_message: Some(format!("Failed: {}", err_msg)),
                     ..Default::default()
                 })
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
             let _ = app_state()
                 .events_tx
                 .send(crate::state::WsEvent::IndexProgress {
@@ -489,7 +525,7 @@ async fn do_auto_import(
     job: &IndexJobRow,
     config: &crate::config::Config,
 ) -> Result<serde_json::Value, AppError> {
-    update_progress(job.id, 10, "Preparing repo…")?;
+    update_progress(job.id, 10, "Preparing repo…").await?;
     let checkout = refresh_cached_repo(
         &config.repo_checkout_base_path(),
         &job.git_url,
@@ -516,15 +552,16 @@ async fn do_auto_import(
         );
         let normalized = normalize_git_url(new_url);
         // If the repo already exists under the old URL, migrate it in-place
-        let mut redir_conn = db_conn()?;
+        let mut redir_conn = db_conn().await?;
         let old_git_url = normalize_git_url(&job.git_url);
         if let Some(existing) = repos::table
             .filter(repos::git_url.eq(&old_git_url))
             .select(RepoRow::as_select())
             .first::<RepoRow>(&mut redir_conn)
+            .await
             .optional()?
         {
-            apply_repo_redirect(&mut redir_conn, existing.id, &job.git_url, new_url)?;
+            apply_repo_redirect(&mut redir_conn, existing.id, &job.git_url, new_url).await?;
         }
         normalized
     } else {
@@ -532,7 +569,7 @@ async fn do_auto_import(
     };
 
     // Resolve index rule (strategy + scan path) before determining scan root.
-    update_progress(job.id, 20, "Resolving index rules…")?;
+    update_progress(job.id, 20, "Resolving index rules…").await?;
     let repo_name = extract_repo_name(&effective_git_url);
     let (domain, path_slug) = parse_git_url_parts(&effective_git_url);
     let repo_sign = format!("{}/{}", domain, path_slug);
@@ -543,10 +580,11 @@ async fn do_auto_import(
 
     let resolved = {
         let mut rule_conn = app_state()
-            .pool
+            .async_pool
             .get()
+            .await
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        super::index_rules::resolve_index_rule(&mut rule_conn, &job.git_url, &job.git_subdir)?
+        super::index_rules::resolve_index_rule(&mut rule_conn, &job.git_url, &job.git_subdir).await?
     };
     println!(
         "[index{}] resolved rule: strategy={:?}, scan_path={}",
@@ -571,7 +609,7 @@ async fn do_auto_import(
     }
 
     // Collect skill candidates
-    update_progress(job.id, 30, "Scanning for skills…")?;
+    update_progress(job.id, 30, "Scanning for skills…").await?;
     let mut candidates = Vec::new();
     collect_skill_candidates(&scan_root, ".", &mut candidates)?;
     println!(
@@ -647,7 +685,7 @@ async fn do_auto_import(
     let is_incremental = checkout.reused && checkout.previous_sha.is_some() && !job.force_index;
 
     // Auto-categorize using the resolved strategy.
-    update_progress(job.id, 50, "Categorizing skills…")?;
+    update_progress(job.id, 50, "Categorizing skills…").await?;
 
     let groups = match resolved.strategy {
         super::index_rules::IndexStrategy::EachDirAsFlock => {
@@ -681,7 +719,7 @@ async fn do_auto_import(
     // Acquire a short-lived connection for the repo setup, then release it
     // so the pool is not held during the (potentially long) per-flock loop.
     let repo = {
-        let mut conn = db_conn()?;
+        let mut conn = db_conn().await?;
 
         // NOTE: previous flocks/skills are preserved and updated via upsert
         // in persist_auto_import_flock. Stale skills (no longer in the repo)
@@ -691,6 +729,7 @@ async fn do_auto_import(
             .filter(repos::git_url.eq(&effective_git_url))
             .select(RepoRow::as_select())
             .first::<RepoRow>(&mut conn)
+            .await
             .optional()?
         {
             diesel::update(repos::table.find(existing.id))
@@ -701,7 +740,8 @@ async fn do_auto_import(
                     updated_at: Some(Utc::now()),
                     ..Default::default()
                 })
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
             RepoRow {
                 name: repo_name.to_string(),
                 git_sha: checkout.head_sha.clone(),
@@ -728,12 +768,14 @@ async fn do_auto_import(
             };
             diesel::insert_into(repos::table)
                 .values(&row)
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
 
             repos::table
                 .filter(repos::git_url.eq(&effective_git_url))
                 .select(RepoRow::as_select())
-                .first::<RepoRow>(&mut conn)?
+                .first::<RepoRow>(&mut conn)
+                .await?
         }
     }; // conn is dropped here — returned to the pool
 
@@ -763,12 +805,13 @@ async fn do_auto_import(
             .any(|i| changed_indices.contains(i));
 
         if is_incremental && !flock_has_changes {
-            let mut conn = db_conn()?;
+            let mut conn = db_conn().await?;
             let existing_flock = flocks::table
                 .filter(flocks::repo_id.eq(repo.id))
                 .filter(flocks::slug.eq(&flock_slug))
                 .select(FlockRow::as_select())
                 .first::<FlockRow>(&mut conn)
+                .await
                 .optional()?;
 
             if let Some(flock_row) = existing_flock {
@@ -780,7 +823,8 @@ async fn do_auto_import(
                         .filter(skills::soft_deleted_at.is_null()),
                 )
                 .set(skills::scan_commit_hash.eq(&checkout.head_sha))
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
 
                 tracing::debug!(
                     "[index] unchanged flock {}/{} — sha bumped to {}",
@@ -803,16 +847,20 @@ async fn do_auto_import(
         // Check ai_request_cache to see if flock metadata was already generated
         // for this commit — if so, reuse existing flock row data and skip AI.
         let (existing_flock_for_meta, flock_meta_cached) = {
-            let mut conn = db_conn()?;
+            let mut conn = db_conn().await?;
             let existing: Option<FlockRow> = flocks::table
                 .filter(flocks::repo_id.eq(repo.id))
                 .filter(flocks::slug.eq(&flock_slug))
                 .select(FlockRow::as_select())
                 .first::<FlockRow>(&mut conn)
+                .await
                 .optional()?;
-            let cached = existing.as_ref().is_some_and(|f| {
-                has_cached_ai_request(&mut conn, "flock_metadata", f.id, &checkout.head_sha)
-            });
+            let cached = match existing.as_ref() {
+                Some(f) => {
+                    has_cached_ai_request(&mut conn, "flock_metadata", f.id, &checkout.head_sha).await
+                }
+                None => false,
+            };
             (existing, cached)
         };
 
@@ -884,7 +932,8 @@ async fn do_auto_import(
                 group_idx + 1,
                 total_groups
             ),
-        )?;
+        )
+        .await?;
 
         let skills = build_auto_import_skills(
             &candidates,
@@ -904,7 +953,7 @@ async fn do_auto_import(
         let source_path = join_repo_relative_path(effective_subdir, &group.source_path);
 
         {
-            let mut conn = db_conn()?;
+            let mut conn = db_conn().await?;
             persist_auto_import_flock(
                 &mut conn,
                 &repo,
@@ -916,7 +965,8 @@ async fn do_auto_import(
                 job.requested_by_user_id,
                 &skills,
                 "scan_job.auto_import",
-            )?;
+            )
+            .await?;
 
             // Record successful flock metadata in ai_request_cache so future
             // re-indexes with the same commit can skip the AI call.
@@ -926,6 +976,7 @@ async fn do_auto_import(
                     .filter(flocks::slug.eq(&flock_slug))
                     .select(FlockRow::as_select())
                     .first::<FlockRow>(&mut conn)
+                    .await
             {
                 cache_ai_request(
                     &mut conn,
@@ -935,7 +986,8 @@ async fn do_auto_import(
                     &checkout.head_sha,
                     true,
                     None,
-                );
+                )
+                .await;
             }
         }
 
@@ -946,13 +998,14 @@ async fn do_auto_import(
     // Soft-delete flocks (and their skills) that are no longer present in the repo.
     if !flock_slugs.is_empty() {
         let now = Utc::now();
-        let mut conn = db_conn()?;
+        let mut conn = db_conn().await?;
         let stale_flock_ids: Vec<Uuid> = flocks::table
             .filter(flocks::repo_id.eq(repo.id))
             .filter(diesel::dsl::not(flocks::slug.eq_any(&flock_slugs)))
             .filter(flocks::soft_deleted_at.is_null())
             .select(flocks::id)
-            .load::<Uuid>(&mut conn)?;
+            .load::<Uuid>(&mut conn)
+            .await?;
         if !stale_flock_ids.is_empty() {
             tracing::info!(
                 "[index{}] soft-deleting {} stale flock(s) for repo {}",
@@ -965,7 +1018,8 @@ async fn do_auto_import(
                     flocks::soft_deleted_at.eq(Some(now)),
                     flocks::updated_at.eq(now),
                 ))
-                .execute(&mut conn)?;
+                .execute(&mut conn)
+            .await?;
             diesel::update(
                 skills::table
                     .filter(skills::flock_id.eq_any(&stale_flock_ids))
@@ -975,7 +1029,8 @@ async fn do_auto_import(
                 skills::soft_deleted_at.eq(Some(now)),
                 skills::updated_at.eq(now),
             ))
-            .execute(&mut conn)?;
+            .execute(&mut conn)
+            .await?;
         }
     }
 
@@ -992,9 +1047,9 @@ async fn do_auto_import(
     // Check ai_request_cache and enhance repo metadata — single conn for sync
     // paths; only the AI branch needs a separate conn after `.await`.
     let needs_ai_repo_meta = {
-        let mut conn = db_conn()?;
+        let mut conn = db_conn().await?;
         let repo_meta_cached =
-            has_cached_ai_request(&mut conn, "repo_metadata", repo.id, &checkout.head_sha);
+            has_cached_ai_request(&mut conn, "repo_metadata", repo.id, &checkout.head_sha).await;
 
         if repo_meta_cached {
             tracing::info!(
@@ -1008,6 +1063,7 @@ async fn do_auto_import(
                 .filter(flocks::repo_id.eq(repo.id))
                 .select(crate::models::FlockRow::as_select())
                 .first::<crate::models::FlockRow>(&mut conn)
+                .await
             {
                 tracing::info!(
                     "[index] single flock — updating repo {} with flock name={:?} desc={:?}",
@@ -1027,7 +1083,8 @@ async fn do_auto_import(
                 &checkout.head_sha,
                 true,
                 None,
-            );
+            )
+            .await;
             false
         } else {
             is_fallback_desc
@@ -1050,7 +1107,7 @@ async fn do_auto_import(
                 }
                 None => (false, Some("AI returned no result")),
             };
-            let mut conn = db_conn()?;
+            let mut conn = db_conn().await?;
             cache_ai_request(
                 &mut conn,
                 "repo_metadata",
@@ -1059,17 +1116,19 @@ async fn do_auto_import(
                 &checkout.head_sha,
                 ai_ok,
                 ai_update,
-            );
+            )
+            .await;
         }
     }
     {
-        let mut conn = db_conn()?;
+        let mut conn = db_conn().await?;
         diesel::update(repos::table.find(repo.id))
             .set(&repo_update)
-            .execute(&mut conn)?;
+            .execute(&mut conn)
+            .await?;
     }
 
-    update_progress(job.id, 95, "Finalizing…")?;
+    update_progress(job.id, 95, "Finalizing…").await?;
     println!(
         "[index{}] done: {} flocks, {} skills total. repo cached at {}",
         job.id,
@@ -1188,8 +1247,8 @@ pub(crate) fn build_auto_import_skills(
     Ok(skills)
 }
 
-pub(crate) fn persist_auto_import_flock(
-    conn: &mut PgConnection,
+pub(crate) async fn persist_auto_import_flock(
+    conn: &mut AsyncPgConnection,
     repo: &RepoRow,
     flock_slug: &str,
     flock_name: &str,
@@ -1206,6 +1265,7 @@ pub(crate) fn persist_auto_import_flock(
         .filter(flocks::slug.eq(flock_slug))
         .select(FlockRow::as_select())
         .first::<FlockRow>(conn)
+        .await
         .optional()?;
 
     let flock_id = existing_flock
@@ -1221,6 +1281,7 @@ pub(crate) fn persist_auto_import_flock(
     let flock_metadata = serde_json::to_value(FlockMetadata::default()).unwrap_or_default();
 
     conn.transaction::<_, AppError, _>(|conn| {
+        async move {
         if let Some(existing) = &existing_flock {
             diesel::update(flocks::table.find(existing.id))
                 .set(FlockChangeset {
@@ -1235,7 +1296,8 @@ pub(crate) fn persist_auto_import_flock(
                     soft_deleted_at: Some(None),
                     ..Default::default()
                 })
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         } else {
             diesel::insert_into(flocks::table)
                 .values(NewFlockRow {
@@ -1263,14 +1325,16 @@ pub(crate) fn persist_auto_import_flock(
                     stats_max_unique_users: 0,
                     soft_deleted_at: None,
                 })
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
 
         let incoming_slugs: Vec<String> = skills.iter().map(|s| s.slug.clone()).collect();
         let existing_skill_rows = skills::table
             .filter(skills::flock_id.eq(flock_id))
             .select(SkillRow::as_select())
-            .load::<SkillRow>(conn)?;
+            .load::<SkillRow>(conn)
+            .await?;
         let existing_by_slug: HashMap<String, SkillRow> = existing_skill_rows
             .into_iter()
             .map(|row| (row.slug.clone(), row))
@@ -1301,7 +1365,8 @@ pub(crate) fn persist_auto_import_flock(
                         updated_at: Some(now),
                         ..Default::default()
                     })
-                    .execute(conn)?;
+                    .execute(conn)
+                    .await?;
             } else {
                 new_skill_rows.push(NewSkillRow {
                     id: Uuid::now_v7(),
@@ -1344,7 +1409,8 @@ pub(crate) fn persist_auto_import_flock(
         for chunk in new_skill_rows.chunks(200) {
             diesel::insert_into(skills::table)
                 .values(chunk)
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
         }
 
         if !incoming_slugs.is_empty() {
@@ -1358,7 +1424,8 @@ pub(crate) fn persist_auto_import_flock(
                 skills::soft_deleted_at.eq(Some(now)),
                 skills::updated_at.eq(now),
             ))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
         }
 
         insert_audit_log(
@@ -1373,10 +1440,14 @@ pub(crate) fn persist_auto_import_flock(
                 "skill_count": skills.len(),
                 "source_path": source_path,
             }),
-        )?;
+        )
+        .await?;
 
         Ok(())
-    })?;
+        }
+        .scope_boxed()
+    })
+    .await?;
 
     Ok(())
 }
@@ -1400,11 +1471,12 @@ fn index_job_dto_from_row(row: &IndexJobRow) -> IndexJobDto {
     }
 }
 
-fn update_progress(job_id: Uuid, pct: i32, message: &str) -> Result<(), AppError> {
+async fn update_progress(job_id: Uuid, pct: i32, message: &str) -> Result<(), AppError> {
     let state = app_state();
     let mut conn = state
-        .pool
+        .async_pool
         .get()
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     diesel::update(index_jobs::table.find(job_id))
         .set(IndexJobChangeset {
@@ -1413,7 +1485,8 @@ fn update_progress(job_id: Uuid, pct: i32, message: &str) -> Result<(), AppError
             updated_at: Some(Utc::now()),
             ..Default::default()
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
     let _ = state.events_tx.send(crate::state::WsEvent::IndexProgress {
         job_id,
         status: "running".to_string(),

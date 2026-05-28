@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use salvo::Request;
 use shared::{UserRole, UserSummary};
 use uuid::Uuid;
@@ -44,7 +45,7 @@ pub fn parse_role(value: &str) -> UserRole {
     }
 }
 
-pub fn optional_auth(req: &Request) -> Result<Option<AuthContext>, AppError> {
+pub async fn optional_auth(req: &Request) -> Result<Option<AuthContext>, AppError> {
     let Some(header_value) = req.headers().get("authorization") else {
         return Ok(None);
     };
@@ -58,8 +59,9 @@ pub fn optional_auth(req: &Request) -> Result<Option<AuthContext>, AppError> {
 
     let state = app_state();
     let mut conn = state
-        .pool
+        .async_pool
         .get()
+        .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
 
     // Look up by SHA-256(token). The plaintext column still exists for the
@@ -69,13 +71,15 @@ pub fn optional_auth(req: &Request) -> Result<Option<AuthContext>, AppError> {
         .filter(user_tokens::token_hash.eq(&presented_hash))
         .select(UserTokenRow::as_select())
         .first(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::Unauthorized("token not recognized".to_string()))?;
 
     let user_row = users::table
         .find(token_row.user_id)
         .select(UserRow::as_select())
-        .first(&mut conn)?;
+        .first(&mut conn)
+        .await?;
 
     Ok(Some(AuthContext {
         user: RequestUser {
@@ -89,8 +93,10 @@ pub fn optional_auth(req: &Request) -> Result<Option<AuthContext>, AppError> {
     }))
 }
 
-pub fn require_auth(req: &Request) -> Result<AuthContext, AppError> {
-    optional_auth(req)?.ok_or_else(|| AppError::Unauthorized("authentication required".to_string()))
+pub async fn require_auth(req: &Request) -> Result<AuthContext, AppError> {
+    optional_auth(req)
+        .await?
+        .ok_or_else(|| AppError::Unauthorized("authentication required".to_string()))
 }
 
 pub fn require_staff(auth: &AuthContext) -> Result<(), AppError> {

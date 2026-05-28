@@ -68,13 +68,14 @@ pub(crate) struct CachedRepoCheckout {
 /// skills) so everything points to the new URL.
 ///
 /// `old_url` and `new_url` should both be normalized HTTPS URLs.
-pub(crate) fn apply_repo_redirect(
-    conn: &mut diesel::PgConnection,
+pub(crate) async fn apply_repo_redirect(
+    conn: &mut diesel_async::AsyncPgConnection,
     repo_id: Uuid,
     old_url: &str,
     new_url: &str,
 ) -> Result<(), AppError> {
     use diesel::prelude::*;
+    use diesel_async::RunQueryDsl;
 
     use crate::models::RepoChangeset;
     use crate::schema::repos;
@@ -105,6 +106,7 @@ pub(crate) fn apply_repo_redirect(
             ..Default::default()
         })
         .execute(conn)
+        .await
         .map_err(|error| {
             AppError::Internal(format!("failed to update repo URL after redirect: {error}"))
         })?;

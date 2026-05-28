@@ -2,6 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use diesel::dsl::count_star;
 use diesel::prelude::*;
+use diesel_async::AsyncPgConnection;
+use diesel_async::RunQueryDsl;
 use shared::{
     BrowseHistoryItem, FlockSummary, PagedResponse, SkillListItem, UserListItem, UserListResponse,
     UserProfileResponse, UserProfileStats, UserRole,
@@ -20,13 +22,14 @@ use crate::schema::{browse_histories, flocks, repos, skill_stars, skill_versions
 const PROFILE_PAGE_SIZE_MAX: i64 = 100;
 const PROFILE_HISTORY_PAGE_SIZE_MAX: i64 = 200;
 
-pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, AppError> {
-    let mut conn = db_conn()?;
+pub async fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, AppError> {
+    let mut conn = db_conn().await?;
     let limit = limit.clamp(1, 100) as usize;
     let users_rows = users::table
         .order(users::handle.asc())
         .select(UserRow::as_select())
-        .load::<UserRow>(&mut conn)?;
+        .load::<UserRow>(&mut conn)
+        .await?;
     let filtered = users_rows
         .into_iter()
         .filter(|row| match query {
@@ -47,7 +50,8 @@ pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, A
     let flock_rows = flocks::table
         .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
-        .load::<FlockRow>(&mut conn)?;
+        .load::<FlockRow>(&mut conn)
+        .await?;
     let mut flocks_by_importer: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
     for flock in &flock_rows {
         flocks_by_importer
@@ -58,7 +62,8 @@ pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, A
     let skill_rows = skills::table
         .filter(skills::soft_deleted_at.is_null())
         .select(SkillRow::as_select())
-        .load::<SkillRow>(&mut conn)?;
+        .load::<SkillRow>(&mut conn)
+        .await?;
     let mut skill_counts_by_flock: HashMap<Uuid, i64> = HashMap::new();
     for row in &skill_rows {
         *skill_counts_by_flock.entry(row.flock_id).or_default() += 1;
@@ -87,20 +92,20 @@ pub fn list_users(query: Option<&str>, limit: i64) -> Result<UserListResponse, A
     Ok(UserListResponse { items, total })
 }
 
-pub fn get_user_profile(
+pub async fn get_user_profile(
     handle_value: &str,
     viewer: Option<&RequestUser>,
 ) -> Result<UserProfileResponse, AppError> {
-    let mut conn = db_conn()?;
-    let context = load_profile_context(&mut conn, handle_value, viewer)?;
-    let published_skill_ids = published_skill_ids_for_user(&mut conn, context.user.id)?;
+    let mut conn = db_conn().await?;
+    let context = load_profile_context(&mut conn, handle_value, viewer).await?;
+    let published_skill_ids = published_skill_ids_for_user(&mut conn, context.user.id).await?;
     let starred_skill_ids = if context.is_self {
-        starred_skill_ids_for_user(&mut conn, context.user.id)?
+        starred_skill_ids_for_user(&mut conn, context.user.id).await?
     } else {
         Vec::new()
     };
     let starred_flock_ids = if context.is_self {
-        starred_flock_ids_for_user(&mut conn, context.user.id)?
+        starred_flock_ids_for_user(&mut conn, context.user.id).await?
     } else {
         Vec::new()
     };
@@ -108,7 +113,8 @@ pub fn get_user_profile(
         browse_histories::table
             .filter(browse_histories::user_id.eq(context.user.id))
             .select(count_star())
-            .first::<i64>(&mut conn)?
+            .first::<i64>(&mut conn)
+            .await?
     } else {
         0
     };
@@ -128,32 +134,32 @@ pub fn get_user_profile(
     })
 }
 
-pub fn get_user_published_skills(
+pub async fn get_user_published_skills(
     handle_value: &str,
     viewer: Option<&RequestUser>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<PagedResponse<SkillListItem>, AppError> {
-    let mut conn = db_conn()?;
-    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let mut conn = db_conn().await?;
+    let context = load_profile_context(&mut conn, handle_value, viewer).await?;
     let viewer_is_staff = viewer
         .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
         .unwrap_or(false);
-    let skill_ids = published_skill_ids_for_user(&mut conn, context.user.id)?;
+    let skill_ids = published_skill_ids_for_user(&mut conn, context.user.id).await?;
     let (page_ids, next_cursor) =
         paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
-    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
+    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff).await?;
     Ok(PagedResponse { items, next_cursor })
 }
 
-pub fn get_user_starred_skills(
+pub async fn get_user_starred_skills(
     handle_value: &str,
     viewer: Option<&RequestUser>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<PagedResponse<SkillListItem>, AppError> {
-    let mut conn = db_conn()?;
-    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let mut conn = db_conn().await?;
+    let context = load_profile_context(&mut conn, handle_value, viewer).await?;
     if !context.is_self {
         return Err(AppError::Forbidden(
             "starred skills are only visible on your own profile".to_string(),
@@ -162,41 +168,41 @@ pub fn get_user_starred_skills(
     let viewer_is_staff = viewer
         .map(|viewer| matches!(viewer.role, UserRole::Admin | UserRole::Moderator))
         .unwrap_or(false);
-    let skill_ids = starred_skill_ids_for_user(&mut conn, context.user.id)?;
+    let skill_ids = starred_skill_ids_for_user(&mut conn, context.user.id).await?;
     let (page_ids, next_cursor) =
         paginate_unique_ids(skill_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
-    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff)?;
+    let items = load_skill_items(&mut conn, page_ids, viewer_is_staff).await?;
     Ok(PagedResponse { items, next_cursor })
 }
 
-pub fn get_user_starred_flocks(
+pub async fn get_user_starred_flocks(
     handle_value: &str,
     viewer: Option<&RequestUser>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<PagedResponse<FlockSummary>, AppError> {
-    let mut conn = db_conn()?;
-    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let mut conn = db_conn().await?;
+    let context = load_profile_context(&mut conn, handle_value, viewer).await?;
     if !context.is_self {
         return Err(AppError::Forbidden(
             "starred flocks are only visible on your own profile".to_string(),
         ));
     }
-    let flock_ids = starred_flock_ids_for_user(&mut conn, context.user.id)?;
+    let flock_ids = starred_flock_ids_for_user(&mut conn, context.user.id).await?;
     let (page_ids, next_cursor) =
         paginate_unique_ids(flock_ids, limit, cursor, PROFILE_PAGE_SIZE_MAX);
-    let items = load_flock_items(&mut conn, page_ids)?;
+    let items = load_flock_items(&mut conn, page_ids).await?;
     Ok(PagedResponse { items, next_cursor })
 }
 
-pub fn get_user_history(
+pub async fn get_user_history(
     handle_value: &str,
     viewer: Option<&RequestUser>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<PagedResponse<BrowseHistoryItem>, AppError> {
-    let mut conn = db_conn()?;
-    let context = load_profile_context(&mut conn, handle_value, viewer)?;
+    let mut conn = db_conn().await?;
+    let context = load_profile_context(&mut conn, handle_value, viewer).await?;
     if !context.is_self {
         return Err(AppError::Forbidden(
             "browse history is only visible on your own profile".to_string(),
@@ -210,7 +216,8 @@ pub fn get_user_history(
         .limit(limit + 1)
         .offset(offset)
         .select(BrowseHistoryRow::as_select())
-        .load::<BrowseHistoryRow>(&mut conn)?;
+        .load::<BrowseHistoryRow>(&mut conn)
+        .await?;
 
     let next_cursor = if rows.len() > limit as usize {
         rows.pop();
@@ -219,7 +226,7 @@ pub fn get_user_history(
         None
     };
 
-    let items = super::browse_history::hydrate_history_items_for_user_page(&mut conn, rows)?;
+    let items = super::browse_history::hydrate_history_items_for_user_page(&mut conn, rows).await?;
     Ok(PagedResponse { items, next_cursor })
 }
 
@@ -228,8 +235,8 @@ struct ProfileContext {
     is_self: bool,
 }
 
-fn load_profile_context(
-    conn: &mut PgConnection,
+async fn load_profile_context(
+    conn: &mut AsyncPgConnection,
     handle_value: &str,
     viewer: Option<&RequestUser>,
 ) -> Result<ProfileContext, AppError> {
@@ -237,14 +244,15 @@ fn load_profile_context(
         .filter(users::handle.eq(handle_value))
         .select(UserRow::as_select())
         .first::<UserRow>(conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("user `{handle_value}` not found")))?;
     let is_self = viewer.map(|viewer| viewer.id == user.id).unwrap_or(false);
     Ok(ProfileContext { user, is_self })
 }
 
-fn published_skill_ids_for_user(
-    conn: &mut PgConnection,
+async fn published_skill_ids_for_user(
+    conn: &mut AsyncPgConnection,
     user_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
     let ids = skill_versions::table
@@ -252,15 +260,16 @@ fn published_skill_ids_for_user(
         .filter(skill_versions::soft_deleted_at.is_null())
         .order(skill_versions::created_at.desc())
         .select(skill_versions::skill_id)
-        .load::<Option<Uuid>>(conn)?
+        .load::<Option<Uuid>>(conn)
+        .await?
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     Ok(ordered_unique_ids(ids))
 }
 
-fn starred_skill_ids_for_user(
-    conn: &mut PgConnection,
+async fn starred_skill_ids_for_user(
+    conn: &mut AsyncPgConnection,
     user_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
     let ids = skill_stars::table
@@ -268,15 +277,16 @@ fn starred_skill_ids_for_user(
         .filter(skill_stars::skill_id.is_not_null())
         .order(skill_stars::created_at.desc())
         .select(skill_stars::skill_id)
-        .load::<Option<Uuid>>(conn)?
+        .load::<Option<Uuid>>(conn)
+        .await?
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
     Ok(ordered_unique_ids(ids))
 }
 
-fn starred_flock_ids_for_user(
-    conn: &mut PgConnection,
+async fn starred_flock_ids_for_user(
+    conn: &mut AsyncPgConnection,
     user_id: Uuid,
 ) -> Result<Vec<Uuid>, AppError> {
     let ids = skill_stars::table
@@ -284,7 +294,8 @@ fn starred_flock_ids_for_user(
         .filter(skill_stars::skill_id.is_null())
         .order(skill_stars::created_at.desc())
         .select(skill_stars::flock_id)
-        .load::<Uuid>(conn)?;
+        .load::<Uuid>(conn)
+        .await?;
     Ok(ordered_unique_ids(ids))
 }
 
@@ -315,8 +326,8 @@ fn parse_cursor(cursor: Option<String>) -> i64 {
         .max(0)
 }
 
-fn load_flock_items(
-    conn: &mut PgConnection,
+async fn load_flock_items(
+    conn: &mut AsyncPgConnection,
     ordered_flock_ids: Vec<Uuid>,
 ) -> Result<Vec<FlockSummary>, AppError> {
     if ordered_flock_ids.is_empty() {
@@ -327,19 +338,22 @@ fn load_flock_items(
         .filter(flocks::id.eq_any(&ordered_flock_ids))
         .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
-        .load::<FlockRow>(conn)?;
+        .load::<FlockRow>(conn)
+        .await?;
     let repo_rows = repos::table
         .filter(repos::id.eq_any(flock_rows.iter().map(|row| row.repo_id).collect::<Vec<_>>()))
         .select(RepoRow::as_select())
-        .load::<RepoRow>(conn)?;
+        .load::<RepoRow>(conn)
+        .await?;
     let importing_users = load_users_map(
         conn,
         flock_rows
             .iter()
             .map(|row| row.imported_by_user_id)
             .collect::<Vec<_>>(),
-    )?;
-    let skill_counts = load_flock_skill_counts(conn, ordered_flock_ids.clone())?;
+    )
+    .await?;
+    let skill_counts = load_flock_skill_counts(conn, ordered_flock_ids.clone()).await?;
 
     let flock_map = flock_rows
         .into_iter()
@@ -364,8 +378,8 @@ fn load_flock_items(
         .collect()
 }
 
-fn load_skill_items(
-    conn: &mut PgConnection,
+async fn load_skill_items(
+    conn: &mut AsyncPgConnection,
     ordered_skill_ids: Vec<Uuid>,
     viewer_is_staff: bool,
 ) -> Result<Vec<SkillListItem>, AppError> {
@@ -380,7 +394,10 @@ fn load_skill_items(
     if !viewer_is_staff {
         query = query.filter(skills::moderation_status.eq("active"));
     }
-    let skill_rows = query.select(SkillRow::as_select()).load::<SkillRow>(conn)?;
+    let skill_rows = query
+        .select(SkillRow::as_select())
+        .load::<SkillRow>(conn)
+        .await?;
     let flock_ids: Vec<Uuid> = skill_rows
         .iter()
         .map(|row| row.flock_id)
@@ -390,9 +407,10 @@ fn load_skill_items(
     let flock_rows = flocks::table
         .filter(flocks::id.eq_any(&flock_ids))
         .select(FlockRow::as_select())
-        .load::<FlockRow>(conn)?;
+        .load::<FlockRow>(conn)
+        .await?;
     let owner_ids: Vec<Uuid> = flock_rows.iter().map(|f| f.imported_by_user_id).collect();
-    let owners = load_users_map(conn, owner_ids)?;
+    let owners = load_users_map(conn, owner_ids).await?;
     let flock_owner_map: HashMap<Uuid, Uuid> = flock_rows
         .iter()
         .map(|f| (f.id, f.imported_by_user_id))
@@ -404,7 +422,8 @@ fn load_skill_items(
             .iter()
             .filter_map(|row| row.latest_version_id)
             .collect::<Vec<_>>(),
-    )?;
+    )
+    .await?;
     let repo_ids: Vec<Uuid> = skill_rows
         .iter()
         .map(|row| row.repo_id)
@@ -414,7 +433,8 @@ fn load_skill_items(
     let repo_rows = repos::table
         .filter(repos::id.eq_any(&repo_ids))
         .select(RepoRow::as_select())
-        .load::<RepoRow>(conn)?;
+        .load::<RepoRow>(conn)
+        .await?;
     let repo_map: HashMap<Uuid, RepoRow> = repo_rows.into_iter().map(|r| (r.id, r)).collect();
 
     let skill_map = skill_rows

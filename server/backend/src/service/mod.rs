@@ -1,4 +1,3 @@
-pub mod async_db;
 pub mod git_ops;
 pub(crate) mod helpers;
 

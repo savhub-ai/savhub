@@ -40,12 +40,13 @@ zip = { version = "8.5", default-features = false, features = ["deflate"] }
 # -- Server-only --
 ammonia = "4.1"
 base64 = "0.22"
+# Sync `diesel` is retained only for its derive macros (Queryable/Insertable/
+# etc.) and for running embedded migrations at startup via a one-shot
+# `PgConnection`. All runtime queries go through `diesel-async` below.
 diesel = { version = "2.3", features = [
-    "postgres", "r2d2", "chrono", "uuid", "serde_json", "64-column-tables",
+    "postgres", "chrono", "uuid", "serde_json", "64-column-tables",
 ] }
-# C2 phase 0: introduce diesel-async + bb8 alongside the existing sync stack.
-# Modules will be ported to AsyncPgConnection one at a time; both pools live
-# in app_state until the migration is complete.
+# C2: all runtime DB access uses diesel-async + a bb8 connection pool.
 diesel-async = { version = "0.8", features = ["postgres", "bb8"] }
 diesel_migrations = "2.3"
 dotenvy = "0.15"

@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
 use shared::{
     ScanVerdict, SecurityScanDto, SecurityScanListResponse, SecurityStatus,
@@ -18,7 +19,7 @@ use super::security_scan::{
     self, FileContent, ModerationVerdict, ScanInput, StaticScanResult, build_moderation_verdict,
 };
 use crate::auth::{AuthContext, require_staff};
-use crate::db::PgPool;
+use crate::db::AsyncPgPool;
 use crate::error::AppError;
 use crate::models::{FlockChangeset, NewSecurityScanRow, RepoRow, SecurityScanRow, SkillRow};
 use crate::schema::{flocks, repos, security_scans, skill_versions, skills};
@@ -27,7 +28,7 @@ use crate::schema::{flocks, repos, security_scans, skill_versions, skills};
 // Staff endpoints (unchanged)
 // ---------------------------------------------------------------------------
 
-pub fn update_flock_security_status(
+pub async fn update_flock_security_status(
     auth: &AuthContext,
     repo_domain: &str,
     repo_path_slug: &str,
@@ -35,9 +36,9 @@ pub fn update_flock_security_status(
     request: UpdateSecurityStatusRequest,
 ) -> Result<serde_json::Value, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
-    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug)?;
+    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
     let status_str = security_status_to_str(request.security_status);
 
@@ -47,12 +48,14 @@ pub fn update_flock_security_status(
             updated_at: Some(Utc::now()),
             ..Default::default()
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     // Propagate to all skill entries
     diesel::update(skills::table.filter(skills::flock_id.eq(flock.id)))
         .set(skills::security_status.eq(status_str))
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -67,7 +70,8 @@ pub fn update_flock_security_status(
             "security_status": status_str,
             "notes": request.notes,
         }),
-    )?;
+    )
+    .await?;
 
     Ok(json!({
         "ok": true,
@@ -75,7 +79,7 @@ pub fn update_flock_security_status(
     }))
 }
 
-pub fn update_skill_security_status(
+pub async fn update_skill_security_status(
     auth: &AuthContext,
     repo_domain: &str,
     repo_path_slug: &str,
@@ -84,9 +88,9 @@ pub fn update_skill_security_status(
     request: UpdateSecurityStatusRequest,
 ) -> Result<serde_json::Value, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
-    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug)?;
+    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
     let status_str = security_status_to_str(request.security_status);
 
@@ -96,7 +100,8 @@ pub fn update_skill_security_status(
             .filter(skills::slug.eq(skill_slug)),
     )
     .set(skills::security_status.eq(status_str))
-    .execute(&mut conn)?;
+    .execute(&mut conn)
+    .await?;
 
     if updated == 0 {
         return Err(AppError::NotFound(format!(
@@ -118,7 +123,8 @@ pub fn update_skill_security_status(
             "security_status": status_str,
             "notes": request.notes,
         }),
-    )?;
+    )
+    .await?;
 
     Ok(json!({
         "ok": true,
@@ -149,20 +155,22 @@ pub struct SkillScanInput {
 
 /// Rebuild static-scan inputs from the cached repo checkout instead of
 /// collecting file contents during the index job itself.
-pub fn build_skill_scan_inputs_from_repo_checkout(
-    pool: &PgPool,
+pub async fn build_skill_scan_inputs_from_repo_checkout(
+    pool: &AsyncPgPool,
     repo_id: Uuid,
     skills_in_flock: &[SkillRow],
 ) -> Vec<SkillScanInput> {
-    let repo = pool.get().ok().and_then(|mut conn| {
-        repos::table
+    let repo = match pool.get().await {
+        Ok(mut conn) => repos::table
             .find(repo_id)
             .select(RepoRow::as_select())
             .first::<RepoRow>(&mut conn)
+            .await
             .optional()
             .ok()
-            .flatten()
-    });
+            .flatten(),
+        Err(_) => None,
+    };
 
     let Some(repo) = repo else {
         return vec![];
@@ -234,12 +242,12 @@ pub struct ScanContext {
 ///
 /// Returns the worst verdict as a string. Skills that pass static scan are set
 /// to "checked" and will be picked up by the AI scan worker separately.
-pub fn run_automated_scans(
-    pool: &PgPool,
+pub async fn run_automated_scans(
+    pool: &AsyncPgPool,
     flock_id: Uuid,
     skills: &[SkillRow],
 ) -> Result<String, AppError> {
-    run_automated_scans_with_files(pool, flock_id, skills, &[], None)
+    run_automated_scans_with_files(pool, flock_id, skills, &[], None).await
 }
 
 /// Enhanced version of `run_automated_scans` that also accepts file contents
@@ -248,8 +256,8 @@ pub fn run_automated_scans(
 /// The enhanced pipeline (static file scanning) only runs when
 /// `SAVHUB_AI_SECURITY_SCAN=true`. Skills that pass static scan are set to
 /// "checked"; the AI scan queue processor will pick them up independently.
-pub fn run_automated_scans_with_files(
-    pool: &PgPool,
+pub async fn run_automated_scans_with_files(
+    pool: &AsyncPgPool,
     flock_id: Uuid,
     skills: &[SkillRow],
     skill_files: &[SkillScanInput],
@@ -261,13 +269,17 @@ pub fn run_automated_scans_with_files(
     if let Some(ref hash) = commit_hash
         && !hash.is_empty()
     {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         let already_scanned = security_scans::table
             .filter(security_scans::target_type.eq("flock"))
             .filter(security_scans::target_id.eq(flock_id))
             .filter(security_scans::commit_hash.eq(hash))
             .select(security_scans::id)
             .first::<Uuid>(&mut conn)
+            .await
             .optional()?
             .is_some();
         if already_scanned {
@@ -315,7 +327,10 @@ pub fn run_automated_scans_with_files(
             .and_then(|sf| sf.version_id);
 
         {
-            let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             diesel::insert_into(security_scans::table)
                 .values(NewSecurityScanRow {
                     id: Uuid::now_v7(),
@@ -330,7 +345,7 @@ pub fn run_automated_scans_with_files(
                     version_id: skill_version_id,
                     commit_hash: commit_hash.clone().unwrap_or_default(),
                 })
-                .execute(&mut conn)?;
+                .execute(&mut conn).await?;
         }
 
         // ----- License audit -----
@@ -341,7 +356,10 @@ pub fn run_automated_scans_with_files(
             None
         };
         {
-            let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
             diesel::insert_into(security_scans::table)
                 .values(NewSecurityScanRow {
                     id: Uuid::now_v7(),
@@ -356,7 +374,7 @@ pub fn run_automated_scans_with_files(
                     version_id: skill_version_id,
                     commit_hash: commit_hash.clone().unwrap_or_default(),
                 })
-                .execute(&mut conn)?;
+                .execute(&mut conn).await?;
         }
 
         // ----- Static scan (on actual file contents) -----
@@ -379,7 +397,10 @@ pub fn run_automated_scans_with_files(
                 ModerationVerdict::Clean => None,
             };
             {
-                let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+                let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
                 diesel::insert_into(security_scans::table)
                     .values(NewSecurityScanRow {
                         id: Uuid::now_v7(),
@@ -399,7 +420,7 @@ pub fn run_automated_scans_with_files(
                         version_id: scan_input.version_id,
                         commit_hash: commit_hash.clone().unwrap_or_default(),
                     })
-                    .execute(&mut conn)?;
+                    .execute(&mut conn).await?;
             }
 
             // Track worst verdict
@@ -418,21 +439,24 @@ pub fn run_automated_scans_with_files(
                 ModerationVerdict::Clean => "checked",
             };
             {
-                let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+                let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
                 diesel::update(skills::table.find(skill.id))
                     .set(skills::security_status.eq(security_status))
-                    .execute(&mut conn)?;
+                    .execute(&mut conn).await?;
             }
 
             // Write consolidated scan_summary to the skill_version row
             if let Some(vid) = scan_input.version_id {
                 let scan_summary = build_initial_scan_summary(&static_result);
                 if let Ok(val) = serde_json::to_value(&scan_summary)
-                    && let Ok(mut conn) = pool.get()
+                    && let Ok(mut conn) = pool.get().await
                 {
                     let _ = diesel::update(skill_versions::table.find(vid))
                         .set(skill_versions::scan_summary.eq(Some(val)))
-                        .execute(&mut conn);
+                        .execute(&mut conn).await;
                 }
             }
 
@@ -459,7 +483,10 @@ pub fn run_automated_scans_with_files(
     // Record a flock-level scan summary
     let worst_str = worst_verdict.to_string();
     {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::insert_into(security_scans::table)
             .values(NewSecurityScanRow {
                 id: Uuid::now_v7(),
@@ -477,7 +504,7 @@ pub fn run_automated_scans_with_files(
                 version_id: None,
                 commit_hash: commit_hash.clone().unwrap_or_default(),
             })
-            .execute(&mut conn)?;
+            .execute(&mut conn).await?;
     }
 
     // Update flock security_status. Static clean → "checked".
@@ -488,10 +515,13 @@ pub fn run_automated_scans_with_files(
         ModerationVerdict::Clean => "checked",
     };
     {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(flocks::table.find(flock_id))
             .set(flocks::security_status.eq(flock_status))
-            .execute(&mut conn)?;
+            .execute(&mut conn).await?;
     }
 
     Ok(worst_str)
@@ -507,10 +537,16 @@ pub fn run_automated_scans_with_files(
 ///
 /// Returns `true` if a scan was actually executed, `false` if files couldn't
 /// be loaded (e.g. checkout missing).
-pub fn run_static_scan_for_skill(pool: &PgPool, skill: &SkillRow) -> Result<bool, AppError> {
+pub async fn run_static_scan_for_skill(
+    pool: &AsyncPgPool,
+    skill: &SkillRow,
+) -> Result<bool, AppError> {
     let repo = {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
-        fetch_repo_for_skill(&mut conn, skill)
+        let mut conn = pool
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
+        fetch_repo_for_skill(&mut conn, skill).await
     };
     let Some(repo) = repo else {
         tracing::debug!(
@@ -553,7 +589,8 @@ pub fn run_static_scan_for_skill(pool: &PgPool, skill: &SkillRow) -> Result<bool
         std::slice::from_ref(skill),
         &[scan_input],
         Some(&scan_ctx),
-    )?;
+    )
+    .await?;
 
     Ok(true)
 }
@@ -563,14 +600,17 @@ pub fn run_static_scan_for_skill(pool: &PgPool, skill: &SkillRow) -> Result<bool
 // ---------------------------------------------------------------------------
 
 /// Atomically claim one skill with `security_status = 'checked'`.
-pub fn claim_ai_scan_task(pool: &PgPool) -> Result<Option<SkillRow>, AppError> {
+pub async fn claim_ai_scan_task(pool: &AsyncPgPool) -> Result<Option<SkillRow>, AppError> {
     // Check if AI is configured
     let config = &crate::state::app_state().config;
     if config.ai_provider.is_none() || config.ai_api_key.is_none() {
         return Ok(None);
     }
 
-    let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+    let mut conn = pool
+        .get()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
     diesel::sql_query(
         "UPDATE skills SET security_status = 'scanning', updated_at = NOW() \
          WHERE id = ( \
@@ -584,12 +624,16 @@ pub fn claim_ai_scan_task(pool: &PgPool) -> Result<Option<SkillRow>, AppError> {
          RETURNING *",
     )
     .get_result::<SkillRow>(&mut conn)
+    .await
     .optional()
     .map_err(Into::into)
 }
 
 /// Process one already-claimed AI scan task.
-pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Result<(), AppError> {
+pub async fn process_claimed_ai_scan_task(
+    pool: &AsyncPgPool,
+    skill: SkillRow,
+) -> Result<(), AppError> {
     tracing::info!(
         "[ai-scan] claimed skill {} ({}), running LLM eval",
         skill.slug,
@@ -597,14 +641,17 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
     );
 
     let (mut files, repo, static_result_opt) = {
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
-        let files = load_skill_files_from_versions(&mut conn, &skill);
+        let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+        let files = load_skill_files_from_versions(&mut conn, &skill).await;
         let repo = if files.is_empty() {
-            fetch_repo_for_skill(&mut conn, &skill)
+            fetch_repo_for_skill(&mut conn, &skill).await
         } else {
             None
         };
-        let static_result_opt = load_latest_static_scan_result(&mut conn, skill.id)?;
+        let static_result_opt = load_latest_static_scan_result(&mut conn, skill.id).await?;
         (files, repo, static_result_opt)
     };
     if files.is_empty()
@@ -618,10 +665,13 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
             "[ai-scan] no files found for {} — marking as checked (skip AI)",
             skill.slug,
         );
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(skills::table.find(skill.id))
             .set(skills::security_status.eq("checked"))
-            .execute(&mut conn)?;
+            .execute(&mut conn).await?;
         return Ok(());
     }
 
@@ -640,10 +690,13 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
             "[ai-scan] no SKILL.md for {} — marking as checked (skip AI)",
             skill.slug,
         );
-        let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+        let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(skills::table.find(skill.id))
             .set(skills::security_status.eq("checked"))
-            .execute(&mut conn)?;
+            .execute(&mut conn).await?;
         return Ok(());
     }
 
@@ -702,14 +755,17 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
                 ModerationVerdict::Clean => "verified",
             };
 
-            let mut conn = pool.get().map_err(|e| AppError::Internal(e.to_string()))?;
+            let mut conn = pool
+                .get()
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?;
 
             diesel::update(skills::table.find(skill.id))
                 .set(skills::security_status.eq(final_status))
-                .execute(&mut conn)?;
+                .execute(&mut conn).await?;
             diesel::update(flocks::table.find(skill.flock_id))
                 .set(flocks::security_status.eq(final_status))
-                .execute(&mut conn)?;
+                .execute(&mut conn).await?;
 
             // Merge LLM verdict into the version scan_summary
             if let Some(vid) = skill.latest_version_id {
@@ -719,7 +775,8 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
                     "benign" | "clean" => ScanVerdict::Benign,
                     _ => ScanVerdict::Pending,
                 };
-                merge_llm_into_scan_summary(&mut conn, vid, llm_verdict, Some(&result.verdict));
+                merge_llm_into_scan_summary(&mut conn, vid, llm_verdict, Some(&result.verdict))
+                    .await;
             }
 
             tracing::info!(
@@ -737,35 +794,42 @@ pub async fn process_claimed_ai_scan_task(pool: &PgPool, skill: SkillRow) -> Res
             );
             let mut conn = pool
                 .get()
+                .await
                 .map_err(|err| AppError::Internal(err.to_string()))?;
             let _ = diesel::update(skills::table.find(skill.id))
                 .set(skills::security_status.eq("checked"))
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
         }
     }
 
     Ok(())
 }
 
-fn fetch_repo_for_skill(conn: &mut PgConnection, skill: &SkillRow) -> Option<RepoRow> {
+async fn fetch_repo_for_skill(conn: &mut AsyncPgConnection, skill: &SkillRow) -> Option<RepoRow> {
     use crate::schema::repos;
 
     repos::table
         .find(skill.repo_id)
         .select(RepoRow::as_select())
         .first::<RepoRow>(conn)
+        .await
         .optional()
         .ok()
         .flatten()
 }
 
 /// Load file contents for AI evaluation from `skill_versions.files`.
-fn load_skill_files_from_versions(conn: &mut PgConnection, skill: &SkillRow) -> Vec<FileContent> {
+async fn load_skill_files_from_versions(
+    conn: &mut AsyncPgConnection,
+    skill: &SkillRow,
+) -> Vec<FileContent> {
     if let Some(vid) = skill.latest_version_id {
         let files_json: Option<serde_json::Value> = skill_versions::table
             .find(vid)
             .select(skill_versions::files)
             .first::<serde_json::Value>(conn)
+            .await
             .optional()
             .ok()
             .flatten();
@@ -835,8 +899,8 @@ fn load_skill_files_from_repo_checkout(repo: &RepoRow, skill: &SkillRow) -> Vec<
     files
 }
 
-fn load_latest_static_scan_result(
-    conn: &mut PgConnection,
+async fn load_latest_static_scan_result(
+    conn: &mut AsyncPgConnection,
     skill_id: Uuid,
 ) -> Result<Option<StaticScanResult>, AppError> {
     Ok(security_scans::table
@@ -845,6 +909,7 @@ fn load_latest_static_scan_result(
         .order(security_scans::created_at.desc())
         .select(security_scans::details)
         .first::<serde_json::Value>(conn)
+        .await
         .optional()?
         .and_then(|details| serde_json::from_value(details).ok()))
 }
@@ -887,8 +952,8 @@ fn build_initial_scan_summary(static_result: &StaticScanResult) -> VersionScanSu
 }
 
 /// Merge LLM evaluation results into an existing scan_summary on a version row.
-pub fn merge_llm_into_scan_summary(
-    conn: &mut diesel::PgConnection,
+pub async fn merge_llm_into_scan_summary(
+    conn: &mut AsyncPgConnection,
     version_id: Uuid,
     verdict: ScanVerdict,
     summary: Option<&str>,
@@ -915,6 +980,7 @@ pub fn merge_llm_into_scan_summary(
             .find(version_id)
             .select(skill_versions::scan_summary)
             .first::<Option<serde_json::Value>>(conn)
+            .await
             .ok()
             .flatten();
 
@@ -926,7 +992,8 @@ pub fn merge_llm_into_scan_summary(
 
         let _ = diesel::update(skill_versions::table.find(version_id))
             .set(skill_versions::scan_summary.eq(Some(serde_json::Value::Object(obj))))
-            .execute(conn);
+            .execute(conn)
+            .await;
     }
 }
 
@@ -934,31 +1001,32 @@ pub fn merge_llm_into_scan_summary(
 // Query endpoints
 // ---------------------------------------------------------------------------
 
-pub fn list_flock_scans_by_slugs(
+pub async fn list_flock_scans_by_slugs(
     repo_domain: &str,
     repo_path_slug: &str,
     flock_slug: &str,
 ) -> Result<SecurityScanListResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
-    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug)?;
-    list_security_scans("flock", flock.id)
+    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
+    list_security_scans("flock", flock.id).await
 }
 
-pub fn list_security_scans(
+pub async fn list_security_scans(
     target_type_val: &str,
     target_id_val: Uuid,
 ) -> Result<SecurityScanListResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let rows = security_scans::table
         .filter(security_scans::target_type.eq(target_type_val))
         .filter(security_scans::target_id.eq(target_id_val))
         .order(security_scans::created_at.desc())
         .select(SecurityScanRow::as_select())
-        .load::<SecurityScanRow>(&mut conn)?;
+        .load::<SecurityScanRow>(&mut conn)
+        .await?;
 
     let user_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.scanned_by_user_id).collect();
-    let users = load_users_map(&mut conn, user_ids)?;
+    let users = load_users_map(&mut conn, user_ids).await?;
 
     let scans = rows
         .into_iter()

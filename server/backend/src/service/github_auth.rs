@@ -1,5 +1,7 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::AsyncPgConnection;
+use diesel_async::RunQueryDsl;
 use reqwest::Url;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
@@ -87,9 +89,9 @@ pub async fn finish_login(
     let access_token = exchange_code_for_access_token(code).await?;
     let github_user = fetch_github_user(&access_token).await?;
 
-    let mut conn = db_conn()?;
-    let user = upsert_github_user(&mut conn, &github_user)?;
-    let token = issue_github_token(&mut conn, user.id)?;
+    let mut conn = db_conn().await?;
+    let user = upsert_github_user(&mut conn, &github_user).await?;
+    let token = issue_github_token(&mut conn, user.id).await?;
 
     insert_audit_log(
         &mut conn,
@@ -98,7 +100,8 @@ pub async fn finish_login(
         "user",
         Some(user.id),
         serde_json::json!({"github_login": github_user.login}),
-    )?;
+    )
+    .await?;
 
     Ok(AuthRedirect {
         location: build_success_redirect(&return_to, &token)?,
@@ -194,13 +197,13 @@ async fn fetch_github_user(access_token: &str) -> Result<GithubUser, AppError> {
         .map_err(|error| AppError::Internal(format!("failed to decode GitHub user: {error}")))
 }
 
-fn upsert_github_user(
-    conn: &mut PgConnection,
+async fn upsert_github_user(
+    conn: &mut AsyncPgConnection,
     github_user: &GithubUser,
 ) -> Result<UserRow, AppError> {
     let github_user_id = github_user.id.to_string();
     let github_login = github_user.login.to_lowercase();
-    let existing = find_existing_user(conn, &github_user_id, &github_login)?;
+    let existing = find_existing_user(conn, &github_user_id, &github_login).await?;
     let role = login_role(&github_login, existing.as_ref());
     let is_new = existing.is_none();
     let now = Utc::now();
@@ -227,18 +230,20 @@ fn upsert_github_user(
                 updated_at: Some(now),
                 ..UserChangeset::default()
             })
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
 
         return users::table
             .find(existing.id)
             .select(UserRow::as_select())
             .first(conn)
+            .await
             .map_err(Into::into);
     }
 
     let user = NewUserRow {
         id: Uuid::now_v7(),
-        handle: unique_handle(conn, &github_login)?,
+        handle: unique_handle(conn, &github_login).await?,
         display_name: github_user.name.clone(),
         bio: github_user.bio.clone(),
         avatar_url: github_user.avatar_url.clone(),
@@ -251,17 +256,19 @@ fn upsert_github_user(
 
     diesel::insert_into(users::table)
         .values(&user)
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
 
     users::table
         .find(user.id)
         .select(UserRow::as_select())
         .first(conn)
+        .await
         .map_err(Into::into)
 }
 
-fn find_existing_user(
-    conn: &mut PgConnection,
+async fn find_existing_user(
+    conn: &mut AsyncPgConnection,
     github_user_id: &str,
     github_login: &str,
 ) -> Result<Option<UserRow>, AppError> {
@@ -269,6 +276,7 @@ fn find_existing_user(
         .filter(users::github_user_id.eq(Some(github_user_id.to_string())))
         .select(UserRow::as_select())
         .first::<UserRow>(conn)
+        .await
         .optional()?
     {
         return Ok(Some(user));
@@ -278,6 +286,7 @@ fn find_existing_user(
         .filter(users::github_login.eq(Some(github_login.to_string())))
         .select(UserRow::as_select())
         .first::<UserRow>(conn)
+        .await
         .optional()?
     {
         return Ok(Some(user));
@@ -289,11 +298,12 @@ fn find_existing_user(
         .filter(users::github_login.is_null())
         .select(UserRow::as_select())
         .first::<UserRow>(conn)
+        .await
         .optional()
         .map_err(Into::into)
 }
 
-fn unique_handle(conn: &mut PgConnection, base: &str) -> Result<String, AppError> {
+async fn unique_handle(conn: &mut AsyncPgConnection, base: &str) -> Result<String, AppError> {
     for suffix in 0..10_000 {
         let candidate = if suffix == 0 {
             base.to_string()
@@ -304,6 +314,7 @@ fn unique_handle(conn: &mut PgConnection, base: &str) -> Result<String, AppError
             .filter(users::handle.eq(&candidate))
             .select(UserRow::as_select())
             .first::<UserRow>(conn)
+            .await
             .optional()?
             .is_some();
         if !exists {
@@ -316,7 +327,7 @@ fn unique_handle(conn: &mut PgConnection, base: &str) -> Result<String, AppError
     ))
 }
 
-fn issue_github_token(conn: &mut PgConnection, user_id: Uuid) -> Result<String, AppError> {
+async fn issue_github_token(conn: &mut AsyncPgConnection, user_id: Uuid) -> Result<String, AppError> {
     // Keep previous tokens so other clients (CLI, desktop) stay logged in.
     let token = format!("ghu_{}", Uuid::now_v7().simple());
     let token_hash = super::helpers::hash_string(&token);
@@ -334,7 +345,8 @@ fn issue_github_token(conn: &mut PgConnection, user_id: Uuid) -> Result<String, 
             token_hash,
             token_prefix,
         })
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
     Ok(token)
 }
 

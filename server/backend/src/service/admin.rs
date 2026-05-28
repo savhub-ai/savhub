@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use serde_json::json;
 use shared::{
     AdminActionResponse, AdminIndexJobDto, AdminIndexJobListResponse, AiUsageSummaryItem,
@@ -23,16 +24,17 @@ use crate::schema::{
     skills, user_tokens, users,
 };
 
-pub fn set_skill_deleted(
+pub async fn set_skill_deleted(
     auth: &AuthContext,
     skill_id: Uuid,
     deleted: bool,
 ) -> Result<DeleteResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let skill = skills::table
         .find(skill_id)
         .select(crate::models::SkillRow::as_select())
         .first::<crate::models::SkillRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("skill `{skill_id}` does not exist")))?;
     if !matches!(auth.user.role, UserRole::Admin | UserRole::Moderator) {
@@ -54,7 +56,8 @@ pub fn set_skill_deleted(
             updated_at: Some(chrono::Utc::now()),
             ..Default::default()
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
     insert_audit_log(
         &mut conn,
         Some(auth.user.id),
@@ -66,11 +69,12 @@ pub fn set_skill_deleted(
         "skill",
         Some(skill.id),
         json!({ "skill_id": skill_id }),
-    )?;
+    )
+    .await?;
     Ok(DeleteResponse { ok: true })
 }
 
-pub fn update_skill_moderation(
+pub async fn update_skill_moderation(
     auth: &AuthContext,
     skill_id: Uuid,
     request: ModerationUpdateRequest,
@@ -81,11 +85,12 @@ pub fn update_skill_moderation(
         ));
     }
 
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let skill = skills::table
         .find(skill_id)
         .select(crate::models::SkillRow::as_select())
         .first::<crate::models::SkillRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("skill `{skill_id}` does not exist")))?;
     let soft_deleted_at = match request.status {
@@ -104,7 +109,8 @@ pub fn update_skill_moderation(
             updated_at: Some(chrono::Utc::now()),
             ..Default::default()
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
     insert_audit_log(
         &mut conn,
         Some(auth.user.id),
@@ -119,45 +125,59 @@ pub fn update_skill_moderation(
             "suspicious": request.suspicious,
             "notes": request.notes,
         }),
-    )?;
-    get_skill_detail_by_id(skill_id, Some(&auth.user))
+    )
+    .await?;
+    get_skill_detail_by_id(skill_id, Some(&auth.user)).await
 }
 
-pub fn management_summary(auth: &AuthContext) -> Result<ManagementSummaryResponse, AppError> {
+pub async fn management_summary(
+    auth: &AuthContext,
+) -> Result<ManagementSummaryResponse, AppError> {
     if !matches!(auth.user.role, UserRole::Admin | UserRole::Moderator) {
         return Err(AppError::Forbidden(
             "moderator or admin access required".to_string(),
         ));
     }
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let counts = CatalogCounts {
-        users: users::table.count().get_result::<i64>(&mut conn)?,
-        repos: repos::table.count().get_result::<i64>(&mut conn)?,
+        users: users::table.count().get_result::<i64>(&mut conn).await?,
+        repos: repos::table.count().get_result::<i64>(&mut conn).await?,
         flocks: flocks::table
             .filter(flocks::soft_deleted_at.is_null())
             .count()
-            .get_result::<i64>(&mut conn)?,
+            .get_result::<i64>(&mut conn)
+            .await?,
         skills: skills::table
             .filter(skills::soft_deleted_at.is_null())
             .count()
-            .get_result::<i64>(&mut conn)?,
-        versions: skill_versions::table.count().get_result::<i64>(&mut conn)?,
-        comments: skill_comments::table.count().get_result::<i64>(&mut conn)?,
+            .get_result::<i64>(&mut conn)
+            .await?,
+        versions: skill_versions::table
+            .count()
+            .get_result::<i64>(&mut conn)
+            .await?,
+        comments: skill_comments::table
+            .count()
+            .get_result::<i64>(&mut conn)
+            .await?,
         reports: reports::table
             .filter(reports::status.eq("pending"))
             .count()
-            .get_result::<i64>(&mut conn)?,
+            .get_result::<i64>(&mut conn)
+            .await?,
     };
 
     let logs = audit_logs::table
         .order(audit_logs::created_at.desc())
         .limit(30)
         .select(AuditLogRow::as_select())
-        .load::<AuditLogRow>(&mut conn)?;
+        .load::<AuditLogRow>(&mut conn)
+        .await?;
     let actors = load_users_map(
         &mut conn,
         logs.iter().filter_map(|row| row.actor_user_id).collect(),
-    )?;
+    )
+    .await?;
     let audit_logs = logs
         .into_iter()
         .map(|row| audit_log_entry_from_row(row, &actors))
@@ -175,7 +195,8 @@ pub fn management_summary(auth: &AuthContext) -> Result<ManagementSummaryRespons
             diesel::dsl::sum(ai_usage_logs::total_tokens).assume_not_null(),
         ))
         .order((ai_usage_logs::task_type.asc(), ai_usage_logs::model.asc()))
-        .load(&mut conn)?;
+        .load(&mut conn)
+        .await?;
     let ai_usage = ai_rows
         .into_iter()
         .map(
@@ -197,17 +218,18 @@ pub fn management_summary(auth: &AuthContext) -> Result<ManagementSummaryRespons
     })
 }
 
-pub fn set_user_role(
+pub async fn set_user_role(
     auth: &AuthContext,
     user_id: Uuid,
     request: SetUserRoleRequest,
 ) -> Result<RoleUpdateResponse, AppError> {
     require_admin(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let user = users::table
         .find(user_id)
         .select(UserRow::as_select())
         .first::<UserRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("user `{user_id}` not found")))?;
     if auth.user.id == user.id && request.role != UserRole::Admin {
@@ -227,12 +249,14 @@ pub fn set_user_role(
             role: Some(user_role_to_str(request.role).to_string()),
             updated_at: Some(chrono::Utc::now()),
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     let updated = users::table
         .find(user.id)
         .select(UserRow::as_select())
-        .first::<UserRow>(&mut conn)?;
+        .first::<UserRow>(&mut conn)
+        .await?;
     insert_audit_log(
         &mut conn,
         Some(auth.user.id),
@@ -243,24 +267,26 @@ pub fn set_user_role(
             "handle": updated.handle,
             "role": request.role,
         }),
-    )?;
+    )
+    .await?;
     Ok(RoleUpdateResponse {
         ok: true,
         user: user_summary_from_row(&updated),
     })
 }
 
-pub fn ban_user(
+pub async fn ban_user(
     auth: &AuthContext,
     user_id: Uuid,
     request: BanUserRequest,
 ) -> Result<BanUserResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let user = users::table
         .find(user_id)
         .select(UserRow::as_select())
         .first::<UserRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("user `{user_id}` not found")))?;
     if auth.user.id == user.id {
@@ -274,12 +300,14 @@ pub fn ban_user(
 
     let now = chrono::Utc::now();
     let revoked_tokens = diesel::delete(user_tokens::table.filter(user_tokens::user_id.eq(user.id)))
-        .execute(&mut conn)? as i64;
+        .execute(&mut conn)
+        .await? as i64;
     // Find flocks imported by the banned user, then soft-delete their skills
     let user_flock_ids: Vec<Uuid> = flocks::table
         .filter(flocks::imported_by_user_id.eq(user.id))
         .select(flocks::id)
-        .load::<Uuid>(&mut conn)?;
+        .load::<Uuid>(&mut conn)
+        .await?;
     let deleted_skills = if user_flock_ids.is_empty() {
         0i64
     } else {
@@ -293,7 +321,8 @@ pub fn ban_user(
             skills::soft_deleted_at.eq(Some(now)),
             skills::updated_at.eq(now),
         ))
-        .execute(&mut conn)? as i64
+        .execute(&mut conn)
+        .await? as i64
     };
     insert_audit_log(
         &mut conn,
@@ -307,7 +336,8 @@ pub fn ban_user(
             "revoked_tokens": revoked_tokens,
             "deleted_skills": deleted_skills,
         }),
-    )?;
+    )
+    .await?;
     Ok(BanUserResponse {
         ok: true,
         user: user_summary_from_row(&user),
@@ -316,14 +346,14 @@ pub fn ban_user(
     })
 }
 
-pub fn list_all_index_jobs(
+pub async fn list_all_index_jobs(
     auth: &AuthContext,
     q: Option<&str>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<AdminIndexJobListResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let offset: i64 = cursor
         .as_deref()
@@ -335,10 +365,11 @@ pub fn list_all_index_jobs(
         .order(index_jobs::created_at.desc())
         .limit(500)
         .select(IndexJobRow::as_select())
-        .load::<IndexJobRow>(&mut conn)?;
+        .load::<IndexJobRow>(&mut conn)
+        .await?;
 
     let user_ids: Vec<Uuid> = rows.iter().map(|r| r.requested_by_user_id).collect();
-    let users_map = load_users_map(&mut conn, user_ids)?;
+    let users_map = load_users_map(&mut conn, user_ids).await?;
 
     let mut dtos: Vec<AdminIndexJobDto> = rows
         .iter()
@@ -400,17 +431,18 @@ pub fn list_all_index_jobs(
     })
 }
 
-pub fn cancel_index_job(
+pub async fn cancel_index_job(
     auth: &AuthContext,
     job_id: Uuid,
 ) -> Result<CancelIndexJobResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let row = index_jobs::table
         .find(job_id)
         .select(IndexJobRow::as_select())
         .first::<IndexJobRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("index job not found".to_string()))?;
 
@@ -431,7 +463,8 @@ pub fn cancel_index_job(
             updated_at: Some(chrono::Utc::now()),
             ..Default::default()
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -440,7 +473,8 @@ pub fn cancel_index_job(
         "index_job",
         Some(job_id),
         json!({ "git_url": row.git_url, "previous_status": row.status }),
-    )?;
+    )
+    .await?;
 
     Ok(CancelIndexJobResponse {
         ok: true,
@@ -449,18 +483,24 @@ pub fn cancel_index_job(
     })
 }
 
-pub fn delete_repo(auth: &AuthContext, repo_id: Uuid) -> Result<AdminActionResponse, AppError> {
+pub async fn delete_repo(
+    auth: &AuthContext,
+    repo_id: Uuid,
+) -> Result<AdminActionResponse, AppError> {
     require_admin(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let repo = repos::table
         .find(repo_id)
         .select(crate::models::RepoRow::as_select())
         .first::<crate::models::RepoRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("repo not found".to_string()))?;
 
-    diesel::delete(repos::table.find(repo_id)).execute(&mut conn)?;
+    diesel::delete(repos::table.find(repo_id))
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -469,7 +509,8 @@ pub fn delete_repo(auth: &AuthContext, repo_id: Uuid) -> Result<AdminActionRespo
         "repo",
         Some(repo_id),
         json!({ "name": repo.name, "git_url": repo.git_url }),
-    )?;
+    )
+    .await?;
 
     Ok(AdminActionResponse {
         ok: true,

@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use serde_json::json;
 use shared::{AddSiteAdminRequest, AdminActionResponse, SiteAdminDto, SiteAdminListResponse};
 use uuid::Uuid;
@@ -10,14 +11,15 @@ use crate::error::AppError;
 use crate::models::{NewSiteAdminRow, SiteAdminRow, UserRow};
 use crate::schema::{site_admins, users};
 
-pub fn list_site_admins(auth: &AuthContext) -> Result<SiteAdminListResponse, AppError> {
+pub async fn list_site_admins(auth: &AuthContext) -> Result<SiteAdminListResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let rows = site_admins::table
         .order(site_admins::created_at.desc())
         .select(SiteAdminRow::as_select())
-        .load::<SiteAdminRow>(&mut conn)?;
+        .load::<SiteAdminRow>(&mut conn)
+        .await?;
 
     let user_ids: Vec<Uuid> = rows.iter().map(|r| r.user_id).collect();
     let granted_ids: Vec<Uuid> = rows.iter().filter_map(|r| r.granted_by_user_id).collect();
@@ -26,7 +28,8 @@ pub fn list_site_admins(auth: &AuthContext) -> Result<SiteAdminListResponse, App
     let user_rows = users::table
         .filter(users::id.eq_any(&all_ids))
         .select(UserRow::as_select())
-        .load::<UserRow>(&mut conn)?;
+        .load::<UserRow>(&mut conn)
+        .await?;
 
     let user_map: std::collections::HashMap<Uuid, &UserRow> =
         user_rows.iter().map(|u| (u.id, u)).collect();
@@ -50,17 +53,18 @@ pub fn list_site_admins(auth: &AuthContext) -> Result<SiteAdminListResponse, App
     Ok(SiteAdminListResponse { admins })
 }
 
-pub fn add_site_admin(
+pub async fn add_site_admin(
     auth: &AuthContext,
     request: AddSiteAdminRequest,
 ) -> Result<AdminActionResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let target_user = users::table
         .filter(users::handle.eq(&request.user_handle))
         .select(UserRow::as_select())
         .first::<UserRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("user `{}` not found", request.user_handle)))?;
 
@@ -69,6 +73,7 @@ pub fn add_site_admin(
         .filter(site_admins::user_id.eq(target_user.id))
         .select(SiteAdminRow::as_select())
         .first::<SiteAdminRow>(&mut conn)
+        .await
         .optional()?;
 
     if existing.is_some() {
@@ -85,7 +90,8 @@ pub fn add_site_admin(
             granted_by_user_id: Some(auth.user.id),
             created_at: Utc::now(),
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -94,7 +100,8 @@ pub fn add_site_admin(
         "user",
         Some(target_user.id),
         json!({ "handle": request.user_handle }),
-    )?;
+    )
+    .await?;
 
     Ok(AdminActionResponse {
         ok: true,
@@ -102,15 +109,16 @@ pub fn add_site_admin(
     })
 }
 
-pub fn remove_site_admin(
+pub async fn remove_site_admin(
     auth: &AuthContext,
     user_id: Uuid,
 ) -> Result<AdminActionResponse, AppError> {
     require_staff(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let deleted = diesel::delete(site_admins::table.filter(site_admins::user_id.eq(user_id)))
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     if deleted == 0 {
         return Err(AppError::NotFound("site admin not found".to_string()));
@@ -123,7 +131,8 @@ pub fn remove_site_admin(
         "user",
         Some(user_id),
         json!({}),
-    )?;
+    )
+    .await?;
 
     Ok(AdminActionResponse {
         ok: true,

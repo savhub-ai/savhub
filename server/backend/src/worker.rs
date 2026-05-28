@@ -2,10 +2,11 @@ use std::collections::HashSet;
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use tokio::task::{JoinHandle, JoinSet};
 use uuid::Uuid;
 
-use crate::db::PgPool;
+use crate::db::AsyncPgPool;
 use crate::models::{
     IndexJobRow, NewIndexJobRow, NewPendingIndexRepoRow, PendingIndexRepoRow, RepoRow, SkillRow,
 };
@@ -14,12 +15,12 @@ use crate::service::git_ops::resolve_remote_sha;
 use crate::service::helpers::{hash_string, normalize_git_url};
 use crate::state::app_state;
 
-pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
+pub fn spawn_worker(pool: AsyncPgPool) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("background worker started");
 
         {
-            match pool.get() {
+            match pool.get().await {
                 Ok(mut conn) => {
                     let recovered =
                         diesel::update(index_jobs::table.filter(index_jobs::status.eq("running")))
@@ -34,6 +35,7 @@ pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
                                 ..Default::default()
                             })
                             .execute(&mut conn)
+                            .await
                             .unwrap_or(0);
 
                     if recovered > 0 {
@@ -57,10 +59,10 @@ pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
             config.auto_index_min_interval_secs,
         ));
 
-        // Static security scan — one thread per concurrency slot.
+        // Static security scan — one async task per concurrency slot.
         for i in 0..config.static_scan_concurrency.max(1) {
             let pool = pool.clone();
-            tokio::task::spawn_blocking(move || static_scan_loop(&pool, i));
+            tokio::spawn(async move { static_scan_loop(&pool, i).await });
         }
 
         // AI security scan: same pattern.
@@ -139,7 +141,7 @@ pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
                     }
 
                     while ai_scan_tasks.len() < max_ai_scan_concurrency {
-                        match pick_checked_skill(&pool, &ai_scanning_ids) {
+                        match pick_checked_skill(&pool, &ai_scanning_ids).await {
                             Ok(Some(skill)) => {
                                 let skill_id = skill.id;
                                 ai_scanning_ids.insert(skill_id);
@@ -168,9 +170,9 @@ pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
                     }
                 }
                 _ = cleanup_tick.tick() => {
-                    match pool.get() {
+                    match pool.get().await {
                         Ok(mut conn) => {
-                            match crate::service::browse_history::cleanup_old_history(&mut conn) {
+                            match crate::service::browse_history::cleanup_old_history(&mut conn).await {
                                 Ok(n) if n > 0 => tracing::info!("cleaned up {n} old browse history entries"),
                                 Ok(_) => {}
                                 Err(e) => tracing::warn!("browse history cleanup error: {e}"),
@@ -204,7 +206,7 @@ pub fn spawn_worker(pool: PgPool) -> JoinHandle<()> {
 }
 
 async fn dispatch_pending_index_jobs(
-    pool: &PgPool,
+    pool: &AsyncPgPool,
     tasks: &mut JoinSet<(Uuid, String)>,
     running_url_hashes: &mut HashSet<String>,
     max_jobs: usize,
@@ -215,13 +217,14 @@ async fn dispatch_pending_index_jobs(
     }
 
     let pending_jobs = {
-        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        let mut conn = pool.get().await.map_err(|e| e.to_string())?;
         index_jobs::table
             .filter(index_jobs::status.eq("pending"))
             .order(index_jobs::created_at.asc())
             .limit((available_slots * 3).max(20) as i64)
             .select(IndexJobRow::as_select())
             .load::<IndexJobRow>(&mut conn)
+            .await
             .map_err(|e| e.to_string())?
     };
 
@@ -263,7 +266,7 @@ async fn dispatch_pending_index_jobs(
     Ok(())
 }
 
-async fn execute_index_job(pool: &PgPool, job_id: Uuid, job_type: &str) {
+async fn execute_index_job(pool: &AsyncPgPool, job_id: Uuid, job_type: &str) {
     match job_type {
         "auto_import" => {
             if let Err(error) = crate::service::index_jobs::execute_auto_import(job_id).await {
@@ -271,8 +274,8 @@ async fn execute_index_job(pool: &PgPool, job_id: Uuid, job_type: &str) {
             }
         }
         "resync" => {
-            let result = pool.get().map_err(|e| e.to_string()).and_then(|mut conn| {
-                diesel::update(index_jobs::table.find(job_id))
+            let result = match pool.get().await {
+                Ok(mut conn) => diesel::update(index_jobs::table.find(job_id))
                     .set(crate::models::IndexJobChangeset {
                         status: Some("completed".to_string()),
                         completed_at: Some(Some(Utc::now())),
@@ -280,16 +283,18 @@ async fn execute_index_job(pool: &PgPool, job_id: Uuid, job_type: &str) {
                         ..Default::default()
                     })
                     .execute(&mut conn)
-                    .map_err(|e| e.to_string())
-            });
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             if let Err(e) = result {
                 tracing::error!(job_id = %job_id, "resync status update failed: {e}");
             }
         }
         other => {
             tracing::warn!(job_id = %job_id, "unknown job type: {other}");
-            let result = pool.get().map_err(|e| e.to_string()).and_then(|mut conn| {
-                diesel::update(index_jobs::table.find(job_id))
+            let result = match pool.get().await {
+                Ok(mut conn) => diesel::update(index_jobs::table.find(job_id))
                     .set(crate::models::IndexJobChangeset {
                         status: Some("failed".to_string()),
                         error_message: Some(Some(format!("unknown job type: {other}"))),
@@ -298,8 +303,10 @@ async fn execute_index_job(pool: &PgPool, job_id: Uuid, job_type: &str) {
                         ..Default::default()
                     })
                     .execute(&mut conn)
-                    .map_err(|e| e.to_string())
-            });
+                    .await
+                    .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
             if let Err(e) = result {
                 tracing::error!(job_id = %job_id, "failed status update failed: {e}");
             }
@@ -310,19 +317,20 @@ async fn execute_index_job(pool: &PgPool, job_id: Uuid, job_type: &str) {
 /// Check ALL repos for new commits and insert changed repos into
 /// `pending_index_repos` with `expected_start_at = last_indexed_at + 1 hour`.
 /// Repos already in `pending_index_repos` are skipped.
-async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
+async fn check_repos_for_new_commits(pool: &AsyncPgPool) -> Result<(), String> {
     let config = &app_state().config;
     let interval_secs = config.auto_index_min_interval_secs as i64;
 
     // Load all repos NOT already in pending_index_repos
     // and NOT indexed within the last interval (default 1 hour)
     let repos_to_check = {
-        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        let mut conn = pool.get().await.map_err(|e| e.to_string())?;
         let threshold = Utc::now() - chrono::Duration::seconds(interval_secs);
 
         let pending_repo_ids: Vec<Uuid> = pending_index_repos::table
             .select(pending_index_repos::repo_id)
             .load(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         let mut query = repos::table
@@ -338,6 +346,7 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
         query
             .select(RepoRow::as_select())
             .load::<RepoRow>(&mut conn)
+            .await
             .map_err(|e| e.to_string())?
     };
 
@@ -367,7 +376,7 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
             continue;
         }
 
-        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        let mut conn = pool.get().await.map_err(|e| e.to_string())?;
 
         // Already indexed this exact SHA — just update last_indexed_at
         let already_indexed: i64 = index_jobs::table
@@ -376,6 +385,7 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
             .filter(index_jobs::status.eq("completed"))
             .count()
             .get_result(&mut conn)
+            .await
             .map_err(|e: diesel::result::Error| e.to_string())?;
 
         if already_indexed > 0 {
@@ -387,6 +397,7 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
                     ..Default::default()
                 })
                 .execute(&mut conn)
+                .await
                 .map_err(|e: diesel::result::Error| e.to_string())?;
             continue;
         }
@@ -417,6 +428,7 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
             .on_conflict(pending_index_repos::repo_id)
             .do_nothing()
             .execute(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
     }
 
@@ -426,18 +438,19 @@ async fn check_repos_for_new_commits(pool: &PgPool) -> Result<(), String> {
 /// Process the `pending_index_repos` queue: pick entries whose
 /// `expected_start_at <= now`, delete them one by one, create an index job,
 /// execute it, and loop until the queue is drained.
-async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
+async fn process_pending_index_repos(pool: &AsyncPgPool) -> Result<(), String> {
     loop {
         let now = Utc::now();
 
         // Pick one ready entry
         let entry = {
-            let mut conn = pool.get().map_err(|e| e.to_string())?;
+            let mut conn = pool.get().await.map_err(|e| e.to_string())?;
             pending_index_repos::table
                 .filter(pending_index_repos::expected_start_at.le(now))
                 .order(pending_index_repos::expected_start_at.asc())
                 .select(PendingIndexRepoRow::as_select())
                 .first::<PendingIndexRepoRow>(&mut conn)
+                .await
                 .optional()
                 .map_err(|e| e.to_string())?
         };
@@ -448,19 +461,21 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
 
         // Delete the entry from the queue
         {
-            let mut conn = pool.get().map_err(|e| e.to_string())?;
+            let mut conn = pool.get().await.map_err(|e| e.to_string())?;
             diesel::delete(pending_index_repos::table.find(entry.id))
                 .execute(&mut conn)
+                .await
                 .map_err(|e| e.to_string())?;
         }
 
         // Load the repo
         let repo = {
-            let mut conn = pool.get().map_err(|e| e.to_string())?;
+            let mut conn = pool.get().await.map_err(|e| e.to_string())?;
             repos::table
                 .find(entry.repo_id)
                 .select(RepoRow::as_select())
                 .first::<RepoRow>(&mut conn)
+                .await
                 .optional()
                 .map_err(|e| e.to_string())?
         };
@@ -484,12 +499,13 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
         };
 
         // Skip if there is already an active job for this URL
-        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        let mut conn = pool.get().await.map_err(|e| e.to_string())?;
         let active_count: i64 = index_jobs::table
             .filter(index_jobs::url_hash.eq(&url_hash))
             .filter(index_jobs::status.eq_any(["pending", "running"]))
             .count()
             .get_result(&mut conn)
+            .await
             .map_err(|e: diesel::result::Error| e.to_string())?;
 
         if active_count > 0 {
@@ -501,6 +517,7 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
             .filter(flocks::repo_id.eq(repo.id))
             .select(flocks::imported_by_user_id)
             .first::<Uuid>(&mut conn)
+            .await
             .unwrap_or(Uuid::nil());
 
         let now = Utc::now();
@@ -537,6 +554,7 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
                 url_hash: Some(url_hash),
             })
             .execute(&mut conn)
+            .await
             .map_err(|e| e.to_string())?;
 
         // Execute the job and wait for completion
@@ -544,14 +562,15 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
         execute_index_job(pool, job_id, "auto_import").await;
 
         // Update last_indexed_at
-        if let Ok(mut conn) = pool.get() {
+        if let Ok(mut conn) = pool.get().await {
             let _ = diesel::update(repos::table.find(repo.id))
                 .set(crate::models::RepoChangeset {
                     last_indexed_at: Some(Some(Utc::now())),
                     updated_at: Some(Utc::now()),
                     ..Default::default()
                 })
-                .execute(&mut conn);
+                .execute(&mut conn)
+                .await;
         }
     }
 
@@ -559,7 +578,7 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Static security scan — single-threaded loop
+// Static security scan — single async loop
 // ---------------------------------------------------------------------------
 
 /// Continuously pick unscanned skills by ID ascending and run static scans.
@@ -567,24 +586,24 @@ async fn process_pending_index_repos(pool: &PgPool) -> Result<(), String> {
 /// After scanning a skill, the next pick uses `id > last_id`. When no larger
 /// ID exists, it wraps around to the smallest unscanned ID. If nothing is
 /// unscanned at all, it sleeps for 1 minute before retrying.
-fn static_scan_loop(pool: &PgPool, thread_idx: usize) {
+async fn static_scan_loop(pool: &AsyncPgPool, thread_idx: usize) {
     tracing::info!("[static-scan-{thread_idx}] loop started");
     let mut last_id: Option<Uuid> = None;
 
     loop {
         // 1. Try to pick the next unscanned skill with id > last_id
-        let skill = pick_next_unscanned_skill(pool, last_id.as_ref());
+        let skill = pick_next_unscanned_skill(pool, last_id.as_ref()).await;
 
         // 2. If none found and we had a cursor, wrap around to the beginning
         let skill = match skill {
             Ok(Some(s)) => Some(s),
             Ok(None) if last_id.is_some() => {
                 last_id = None;
-                match pick_next_unscanned_skill(pool, None) {
+                match pick_next_unscanned_skill(pool, None).await {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!("[static-scan] pick error (wrap-around): {e}");
-                        std::thread::sleep(std::time::Duration::from_secs(60));
+                        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                         continue;
                     }
                 }
@@ -592,14 +611,14 @@ fn static_scan_loop(pool: &PgPool, thread_idx: usize) {
             Ok(None) => None,
             Err(e) => {
                 tracing::warn!("[static-scan] pick error: {e}");
-                std::thread::sleep(std::time::Duration::from_secs(60));
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
             }
         };
 
         // 3. Nothing unscanned at all → sleep 1 minute
         let Some(skill) = skill else {
-            std::thread::sleep(std::time::Duration::from_secs(60));
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             continue;
         };
 
@@ -607,20 +626,22 @@ fn static_scan_loop(pool: &PgPool, thread_idx: usize) {
         let slug = skill.slug.clone();
 
         // 4. Run the scan
-        match crate::service::security::run_static_scan_for_skill(pool, &skill) {
+        match crate::service::security::run_static_scan_for_skill(pool, &skill).await {
             Ok(true) => {
                 tracing::debug!("[static-scan] completed: skill={} ({})", slug, skill_id);
                 // Ensure the skill is no longer "unscanned" so we don't pick it again.
-                if let Ok(mut conn) = pool.get() {
+                if let Ok(mut conn) = pool.get().await {
                     let current: Option<String> = skills::table
                         .find(skill_id)
                         .select(skills::security_status)
                         .first(&mut conn)
+                        .await
                         .ok();
                     if current.as_deref() == Some("unscanned") {
                         let _ = diesel::update(skills::table.find(skill_id))
                             .set(skills::security_status.eq("checked"))
-                            .execute(&mut conn);
+                            .execute(&mut conn)
+                            .await;
                     }
                 }
             }
@@ -631,10 +652,11 @@ fn static_scan_loop(pool: &PgPool, thread_idx: usize) {
                     slug,
                     skill_id,
                 );
-                if let Ok(mut conn) = pool.get() {
+                if let Ok(mut conn) = pool.get().await {
                     let _ = diesel::update(skills::table.find(skill_id))
                         .set(skills::security_status.eq("checked"))
-                        .execute(&mut conn);
+                        .execute(&mut conn)
+                        .await;
                 }
             }
             Err(e) => {
@@ -656,11 +678,11 @@ fn static_scan_loop(pool: &PgPool, thread_idx: usize) {
 
 /// Pick one unscanned skill with `id > after_id` (or the smallest if `None`),
 /// ordered by id ascending.
-fn pick_next_unscanned_skill(
-    pool: &PgPool,
+async fn pick_next_unscanned_skill(
+    pool: &AsyncPgPool,
     after_id: Option<&Uuid>,
 ) -> Result<Option<SkillRow>, String> {
-    let mut conn = pool.get().map_err(|e| e.to_string())?;
+    let mut conn = pool.get().await.map_err(|e| e.to_string())?;
 
     let mut query = skills::table
         .filter(skills::security_status.eq("unscanned"))
@@ -676,6 +698,7 @@ fn pick_next_unscanned_skill(
     query
         .select(SkillRow::as_select())
         .first::<SkillRow>(&mut conn)
+        .await
         .optional()
         .map_err(|e| e.to_string())
 }
@@ -686,11 +709,11 @@ fn pick_next_unscanned_skill(
 
 /// Pick one skill with `security_status = 'checked'` that is not currently
 /// being AI-scanned (not in the in-memory exclusion set).
-fn pick_checked_skill(
-    pool: &PgPool,
+async fn pick_checked_skill(
+    pool: &AsyncPgPool,
     exclude_ids: &HashSet<Uuid>,
 ) -> Result<Option<SkillRow>, String> {
-    let mut conn = pool.get().map_err(|e| e.to_string())?;
+    let mut conn = pool.get().await.map_err(|e| e.to_string())?;
     let exclude: Vec<Uuid> = exclude_ids.iter().copied().collect();
 
     let skill = skills::table
@@ -700,6 +723,7 @@ fn pick_checked_skill(
         .order(skills::updated_at.asc())
         .select(SkillRow::as_select())
         .first::<SkillRow>(&mut conn)
+        .await
         .optional()
         .map_err(|e| e.to_string())?;
 

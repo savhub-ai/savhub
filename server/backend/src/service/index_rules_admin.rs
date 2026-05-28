@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use shared::{
     AdminActionResponse, CreateIndexRuleRequest, IndexRuleDto, IndexRuleListResponse,
     UpdateIndexRuleRequest,
@@ -12,14 +13,14 @@ use crate::error::AppError;
 use crate::models::{IndexRuleChangeset, IndexRuleRow, NewIndexRuleRow};
 use crate::schema::index_rules;
 
-pub fn list_index_rules(
+pub async fn list_index_rules(
     auth: &AuthContext,
     q: Option<&str>,
     limit: i64,
     cursor: Option<String>,
 ) -> Result<IndexRuleListResponse, AppError> {
     require_admin(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let offset: i64 = cursor
         .as_deref()
@@ -30,7 +31,8 @@ pub fn list_index_rules(
     let rows = index_rules::table
         .order(index_rules::repo_url.asc())
         .select(IndexRuleRow::as_select())
-        .load::<IndexRuleRow>(&mut conn)?;
+        .load::<IndexRuleRow>(&mut conn)
+        .await?;
 
     let mut dtos: Vec<IndexRuleDto> = rows.iter().map(dto_from_row).collect();
 
@@ -64,7 +66,7 @@ pub fn list_index_rules(
     })
 }
 
-pub fn create_index_rule(
+pub async fn create_index_rule(
     auth: &AuthContext,
     request: CreateIndexRuleRequest,
 ) -> Result<IndexRuleDto, AppError> {
@@ -79,7 +81,7 @@ pub fn create_index_rule(
 
     let repo_url = normalize_git_url(&request.repo_url);
 
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let now = Utc::now();
 
     let existing = index_rules::table
@@ -87,6 +89,7 @@ pub fn create_index_rule(
         .filter(index_rules::path_regex.eq(&request.path_regex))
         .select(IndexRuleRow::as_select())
         .first::<IndexRuleRow>(&mut conn)
+        .await
         .optional()?;
 
     if existing.is_some() {
@@ -108,28 +111,31 @@ pub fn create_index_rule(
 
     diesel::insert_into(index_rules::table)
         .values(&row)
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     let inserted = index_rules::table
         .find(row.id)
         .select(IndexRuleRow::as_select())
-        .first::<IndexRuleRow>(&mut conn)?;
+        .first::<IndexRuleRow>(&mut conn)
+        .await?;
 
     Ok(dto_from_row(&inserted))
 }
 
-pub fn update_index_rule(
+pub async fn update_index_rule(
     auth: &AuthContext,
     id: Uuid,
     request: UpdateIndexRuleRequest,
 ) -> Result<IndexRuleDto, AppError> {
     require_admin(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
     let _existing = index_rules::table
         .find(id)
         .select(IndexRuleRow::as_select())
         .first::<IndexRuleRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("index rule not found".to_string()))?;
 
@@ -143,21 +149,28 @@ pub fn update_index_rule(
 
     diesel::update(index_rules::table.find(id))
         .set(&changeset)
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     let updated = index_rules::table
         .find(id)
         .select(IndexRuleRow::as_select())
-        .first::<IndexRuleRow>(&mut conn)?;
+        .first::<IndexRuleRow>(&mut conn)
+        .await?;
 
     Ok(dto_from_row(&updated))
 }
 
-pub fn delete_index_rule(auth: &AuthContext, id: Uuid) -> Result<AdminActionResponse, AppError> {
+pub async fn delete_index_rule(
+    auth: &AuthContext,
+    id: Uuid,
+) -> Result<AdminActionResponse, AppError> {
     require_admin(auth)?;
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
 
-    let deleted = diesel::delete(index_rules::table.find(id)).execute(&mut conn)?;
+    let deleted = diesel::delete(index_rules::table.find(id))
+        .execute(&mut conn)
+        .await?;
 
     if deleted == 0 {
         return Err(AppError::NotFound("index rule not found".to_string()));

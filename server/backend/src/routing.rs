@@ -203,7 +203,7 @@ pub fn router() -> Router {
 #[handler]
 async fn health(res: &mut Response) {
     let state = crate::state::app_state();
-    match state.pool.get() {
+    match state.async_pool.get().await {
         Ok(_) => res.render(Json(json!({ "status": "ok" }))),
         Err(_) => {
             res.status_code(StatusCode::SERVICE_UNAVAILABLE);
@@ -293,7 +293,7 @@ async fn finish_github_login(req: &mut Request, res: &mut Response) {
 
 #[handler]
 async fn whoami(req: &mut Request, res: &mut Response) {
-    match optional_auth(req) {
+    match optional_auth(req).await {
         Ok(auth) => {
             let response = catalog::whoami(auth.as_ref());
             if let Some(user) = response.user.as_ref() {
@@ -314,7 +314,7 @@ async fn search(req: &mut Request, res: &mut Response) {
     let kind = req
         .query::<String>("kind")
         .and_then(|kind| parse_kind(&kind));
-    match catalog::search_catalog(&query, kind, limit) {
+    match catalog::search_catalog(&query, kind, limit).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -331,7 +331,7 @@ async fn resolve_skill(req: &mut Request, res: &mut Response) {
         );
         return;
     }
-    match catalog::resolve_skill(&slug, &hash) {
+    match catalog::resolve_skill(&slug, &hash).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -351,14 +351,15 @@ async fn download_bundle(req: &mut Request, res: &mut Response) {
     let kind = req
         .query::<String>("kind")
         .and_then(|value| parse_kind(&value));
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let result = match kind.unwrap_or(ResourceKind::Skill) {
         ResourceKind::Skill => catalog::download_skill_bundle(
             &slug,
             version.as_deref(),
             tag.as_deref(),
             auth.as_ref().map(|ctx| &ctx.user),
-        ),
+        )
+        .await,
     };
 
     match result {
@@ -398,7 +399,7 @@ async fn list_skills(req: &mut Request, res: &mut Response) {
     let flock_id = req
         .query::<String>("flock")
         .and_then(|v| uuid::Uuid::parse_str(&v).ok());
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     match catalog::list_skills(
         &sort,
         limit,
@@ -409,7 +410,9 @@ async fn list_skills(req: &mut Request, res: &mut Response) {
         path_param,
         flock_id,
         auth.as_ref().map(|ctx| &ctx.user),
-    ) {
+    )
+    .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -429,7 +432,7 @@ async fn list_all_flocks(req: &mut Request, res: &mut Response) {
         .as_deref()
         .and_then(|v| uuid::Uuid::parse_str(v).ok());
     let repo_url = repo_param.filter(|v| repo_id.is_none() && !v.trim().is_empty());
-    match catalog::list_flocks(&sort, limit, cursor, q, repo_id, repo_url, slug_param) {
+    match catalog::list_flocks(&sort, limit, cursor, q, repo_id, repo_url, slug_param).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -444,8 +447,8 @@ async fn get_flock_by_id(req: &mut Request, res: &mut Response) {
             return;
         }
     };
-    let auth = optional_auth(req).ok().flatten();
-    match repos::get_flock_by_id(id, auth.as_ref().map(|ctx| &ctx.user)) {
+    let auth = optional_auth(req).await.ok().flatten();
+    match repos::get_flock_by_id(id, auth.as_ref().map(|ctx| &ctx.user)).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -456,7 +459,7 @@ async fn list_repos(req: &mut Request, res: &mut Response) {
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
     let q = req.query::<String>("q");
-    match repos::list_repos(limit, cursor, q) {
+    match repos::list_repos(limit, cursor, q).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -472,7 +475,7 @@ async fn create_repo(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match repos::create_repo(auth, body) {
+    match repos::create_repo(auth, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -482,7 +485,7 @@ async fn create_repo(req: &mut Request, depot: &Depot, res: &mut Response) {
 async fn get_repo_detail(req: &mut Request, res: &mut Response) {
     let domain = req.param::<String>("domain").unwrap_or_default();
     let path_slug = repo_path_slug(req);
-    match repos::get_repo_detail(&domain, &path_slug) {
+    match repos::get_repo_detail(&domain, &path_slug).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -493,13 +496,15 @@ async fn get_flock_detail(req: &mut Request, res: &mut Response) {
     let domain = req.param::<String>("domain").unwrap_or_default();
     let path_slug = repo_path_slug(req);
     let flock_slug = req.param::<String>("flock_slug").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     match repos::get_flock_detail(
         &domain,
         &path_slug,
         &flock_slug,
         auth.as_ref().map(|ctx| &ctx.user),
-    ) {
+    )
+    .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -514,8 +519,8 @@ async fn get_skill_detail(req: &mut Request, res: &mut Response) {
             return;
         }
     };
-    let auth = optional_auth(req).ok().flatten();
-    match catalog::get_skill_detail_by_id(id, auth.as_ref().map(|ctx| &ctx.user)) {
+    let auth = optional_auth(req).await.ok().flatten();
+    match catalog::get_skill_detail_by_id(id, auth.as_ref().map(|ctx| &ctx.user)).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -539,14 +544,16 @@ async fn get_skill_file(req: &mut Request, res: &mut Response) {
     };
     let version = req.query::<String>("version");
     let tag = req.query::<String>("tag");
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     match catalog::get_skill_file_by_id(
         id,
         version.as_deref(),
         tag.as_deref(),
         &path,
         auth.as_ref().map(|ctx| &ctx.user),
-    ) {
+    )
+    .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -569,7 +576,7 @@ async fn add_skill_comment(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match interactions::add_skill_comment(auth, id, body) {
+    match interactions::add_skill_comment(auth, id, body).await {
         Ok(payload) => res.render(Json(json!({ "comments": payload }))),
         Err(error) => render_error(res, error),
     }
@@ -592,7 +599,7 @@ async fn delete_skill_comment(req: &mut Request, depot: &Depot, res: &mut Respon
         }
     };
     let auth = auth_from_depot(depot);
-    match interactions::delete_skill_comment(auth, id, comment_id) {
+    match interactions::delete_skill_comment(auth, id, comment_id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -608,7 +615,7 @@ async fn toggle_skill_star(req: &mut Request, depot: &Depot, res: &mut Response)
         }
     };
     let auth = auth_from_depot(depot);
-    match interactions::toggle_skill_star(auth, id) {
+    match interactions::toggle_skill_star(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -620,7 +627,7 @@ async fn toggle_flock_star(req: &mut Request, depot: &Depot, res: &mut Response)
     let path_slug = repo_path_slug(req);
     let flock_slug = req.param::<String>("flock_slug").unwrap_or_default();
     let auth = auth_from_depot(depot);
-    match interactions::toggle_flock_star(auth, &domain, &path_slug, &flock_slug) {
+    match interactions::toggle_flock_star(auth, &domain, &path_slug, &flock_slug).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -643,7 +650,7 @@ async fn update_skill_moderation(req: &mut Request, depot: &Depot, res: &mut Res
             return;
         }
     };
-    match admin::update_skill_moderation(auth, id, body) {
+    match admin::update_skill_moderation(auth, id, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -659,7 +666,7 @@ async fn delete_skill(req: &mut Request, depot: &Depot, res: &mut Response) {
         }
     };
     let auth = auth_from_depot(depot);
-    match admin::set_skill_deleted(auth, id, true) {
+    match admin::set_skill_deleted(auth, id, true).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -675,7 +682,7 @@ async fn restore_skill(req: &mut Request, depot: &Depot, res: &mut Response) {
         }
     };
     let auth = auth_from_depot(depot);
-    match admin::set_skill_deleted(auth, id, false) {
+    match admin::set_skill_deleted(auth, id, false).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -695,14 +702,14 @@ async fn collect_install(req: &mut Request, res: &mut Response) {
     let body: RecordInstallRequest = req.parse_json().await.unwrap_or(RecordInstallRequest {
         client_type: "unknown".to_string(),
     });
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let user_id = auth.map(|a| a.user.id);
     let client_type = if body.client_type.is_empty() {
         "unknown"
     } else {
         &body.client_type
     };
-    match interactions::record_skill_install(&repo_url, &skill_path, user_id, client_type) {
+    match interactions::record_skill_install(&repo_url, &skill_path, user_id, client_type).await {
         Ok(result) => res.render(Json(json!({ "ok": result.ok, "message": result.message }))),
         Err(error) => render_error(res, error),
     }
@@ -712,7 +719,7 @@ async fn collect_install(req: &mut Request, res: &mut Response) {
 async fn list_users(req: &mut Request, res: &mut Response) {
     let q = req.query::<String>("q");
     let limit = req.query::<i64>("limit").unwrap_or(30);
-    match users::list_users(q.as_deref(), limit) {
+    match users::list_users(q.as_deref(), limit).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -721,8 +728,8 @@ async fn list_users(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn get_user_profile(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
-    match users::get_user_profile(&handle, auth.as_ref().map(|ctx| &ctx.user)) {
+    let auth = optional_auth(req).await.ok().flatten();
+    match users::get_user_profile(&handle, auth.as_ref().map(|ctx| &ctx.user)).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -731,7 +738,7 @@ async fn get_user_profile(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn get_user_published_skills(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
     match users::get_user_published_skills(
@@ -739,7 +746,9 @@ async fn get_user_published_skills(req: &mut Request, res: &mut Response) {
         auth.as_ref().map(|ctx| &ctx.user),
         limit,
         cursor,
-    ) {
+    )
+    .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -748,10 +757,11 @@ async fn get_user_published_skills(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn get_user_starred_skills(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
     match users::get_user_starred_skills(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor)
+        .await
     {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
@@ -761,10 +771,11 @@ async fn get_user_starred_skills(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn get_user_starred_flocks(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
     match users::get_user_starred_flocks(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor)
+        .await
     {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
@@ -774,10 +785,10 @@ async fn get_user_starred_flocks(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn get_user_history(req: &mut Request, res: &mut Response) {
     let handle = req.param::<String>("handle").unwrap_or_default();
-    let auth = optional_auth(req).ok().flatten();
+    let auth = optional_auth(req).await.ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match users::get_user_history(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor) {
+    match users::get_user_history(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -786,7 +797,7 @@ async fn get_user_history(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn management_summary(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match admin::management_summary(auth) {
+    match admin::management_summary(auth).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -812,7 +823,7 @@ async fn update_user_role(req: &mut Request, depot: &Depot, res: &mut Response) 
             return;
         }
     };
-    match admin::set_user_role(auth, id, body) {
+    match admin::set_user_role(auth, id, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -838,7 +849,7 @@ async fn ban_user(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match admin::ban_user(auth, id, body) {
+    match admin::ban_user(auth, id, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -881,7 +892,7 @@ async fn add_flock_comment(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match interactions::add_flock_comment(auth, &domain, &path_slug, &flock_slug, body) {
+    match interactions::add_flock_comment(auth, &domain, &path_slug, &flock_slug, body).await {
         Ok(payload) => res.render(Json(json!({ "comments": payload }))),
         Err(error) => render_error(res, error),
     }
@@ -900,7 +911,9 @@ async fn delete_flock_comment(req: &mut Request, depot: &Depot, res: &mut Respon
         }
     };
     let auth = auth_from_depot(depot);
-    match interactions::delete_flock_comment(auth, &domain, &path_slug, &flock_slug, comment_id) {
+    match interactions::delete_flock_comment(auth, &domain, &path_slug, &flock_slug, comment_id)
+        .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -919,7 +932,7 @@ async fn rate_flock(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match interactions::rate_flock(auth, &domain, &path_slug, &flock_slug, body) {
+    match interactions::rate_flock(auth, &domain, &path_slug, &flock_slug, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -935,7 +948,7 @@ async fn create_report(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match reports::create_report(auth, body) {
+    match reports::create_report(auth, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -944,7 +957,7 @@ async fn create_report(req: &mut Request, depot: &Depot, res: &mut Response) {
 #[handler]
 async fn list_reports(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match reports::list_reports(auth) {
+    match reports::list_reports(auth).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -970,7 +983,7 @@ async fn review_report(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match reports::review_report(auth, id, body) {
+    match reports::review_report(auth, id, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -982,7 +995,7 @@ async fn block_flock(req: &mut Request, depot: &Depot, res: &mut Response) {
     let path_slug = repo_path_slug(req);
     let flock_slug = req.param::<String>("flock_slug").unwrap_or_default();
     let auth = auth_from_depot(depot);
-    match blocks::block_flock(auth, &domain, &path_slug, &flock_slug) {
+    match blocks::block_flock(auth, &domain, &path_slug, &flock_slug).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -994,7 +1007,7 @@ async fn unblock_flock(req: &mut Request, depot: &Depot, res: &mut Response) {
     let path_slug = repo_path_slug(req);
     let flock_slug = req.param::<String>("flock_slug").unwrap_or_default();
     let auth = auth_from_depot(depot);
-    match blocks::unblock_flock(auth, &domain, &path_slug, &flock_slug) {
+    match blocks::unblock_flock(auth, &domain, &path_slug, &flock_slug).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1003,7 +1016,7 @@ async fn unblock_flock(req: &mut Request, depot: &Depot, res: &mut Response) {
 #[handler]
 async fn list_blocked_flocks(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match blocks::list_blocked_flocks(auth) {
+    match blocks::list_blocked_flocks(auth).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1012,7 +1025,7 @@ async fn list_blocked_flocks(depot: &Depot, res: &mut Response) {
 #[handler]
 async fn get_my_custom_selectors(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match custom_selectors::get_custom_selectors(auth) {
+    match custom_selectors::get_custom_selectors(auth).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1041,7 +1054,7 @@ async fn save_my_custom_selectors(req: &mut Request, depot: &Depot, res: &mut Re
             return;
         }
     };
-    match custom_selectors::save_custom_selectors(auth, body) {
+    match custom_selectors::save_custom_selectors(auth, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1050,7 +1063,7 @@ async fn save_my_custom_selectors(req: &mut Request, depot: &Depot, res: &mut Re
 #[handler]
 async fn get_my_starred_skill_ids(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match interactions::get_starred_skill_ids(auth) {
+    match interactions::get_starred_skill_ids(auth).await {
         Ok(ids) => res.render(Json(shared::StarredIdsResponse { skill_ids: ids })),
         Err(error) => render_error(res, error),
     }
@@ -1062,7 +1075,7 @@ async fn get_my_starred_skill_ids(depot: &Depot, res: &mut Response) {
 async fn get_my_starred_skills(req: &mut Request, depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
     let limit = req.query::<i64>("limit").unwrap_or(50);
-    match catalog::list_my_starred_skills(auth, limit) {
+    match catalog::list_my_starred_skills(auth, limit).await {
         Ok(page) => res.render(Json(page)),
         Err(error) => render_error(res, error),
     }
@@ -1083,7 +1096,7 @@ fn render_error(res: &mut Response, error: AppError) {
 /// Hoop: reject requests without a valid bearer token.
 #[handler]
 async fn login_hoop(req: &mut Request, depot: &mut Depot, res: &mut Response, ctrl: &mut FlowCtrl) {
-    match require_auth(req) {
+    match require_auth(req).await {
         Ok(auth) => {
             depot.insert("auth_context", auth);
         }
@@ -1148,7 +1161,7 @@ async fn get_index_job(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match index_jobs::get_index_job(auth, id) {
+    match index_jobs::get_index_job(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1159,7 +1172,7 @@ async fn list_index_jobs(req: &mut Request, depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let offset = req.query::<i64>("offset").unwrap_or(0);
-    match index_jobs::list_index_jobs(auth, limit, offset) {
+    match index_jobs::list_index_jobs(auth, limit, offset).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1178,7 +1191,8 @@ async fn update_flock_security(req: &mut Request, depot: &Depot, res: &mut Respo
             return;
         }
     };
-    match security::update_flock_security_status(auth, &domain, &path_slug, &flock_slug, body) {
+    match security::update_flock_security_status(auth, &domain, &path_slug, &flock_slug, body).await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1205,7 +1219,9 @@ async fn update_skill_security(req: &mut Request, depot: &Depot, res: &mut Respo
         &flock_slug,
         &skill_slug,
         body,
-    ) {
+    )
+    .await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1216,7 +1232,7 @@ async fn list_flock_scans(req: &mut Request, res: &mut Response) {
     let domain = req.param::<String>("domain").unwrap_or_default();
     let path_slug = repo_path_slug(req);
     let flock_slug = req.param::<String>("flock_slug").unwrap_or_default();
-    match security::list_flock_scans_by_slugs(&domain, &path_slug, &flock_slug) {
+    match security::list_flock_scans_by_slugs(&domain, &path_slug, &flock_slug).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1225,7 +1241,7 @@ async fn list_flock_scans(req: &mut Request, res: &mut Response) {
 #[handler]
 async fn list_site_admins(depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
-    match site_admins::list_site_admins(auth) {
+    match site_admins::list_site_admins(auth).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1241,7 +1257,7 @@ async fn add_site_admin(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match site_admins::add_site_admin(auth, body) {
+    match site_admins::add_site_admin(auth, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1260,7 +1276,7 @@ async fn remove_site_admin(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match site_admins::remove_site_admin(auth, id) {
+    match site_admins::remove_site_admin(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1272,7 +1288,7 @@ async fn list_index_rules(req: &mut Request, depot: &Depot, res: &mut Response) 
     let q = req.query::<String>("q");
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match index_rules_admin::list_index_rules(auth, q.as_deref(), limit, cursor) {
+    match index_rules_admin::list_index_rules(auth, q.as_deref(), limit, cursor).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1288,7 +1304,7 @@ async fn create_index_rule(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match index_rules_admin::create_index_rule(auth, body) {
+    match index_rules_admin::create_index_rule(auth, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1311,7 +1327,7 @@ async fn update_index_rule(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match index_rules_admin::update_index_rule(auth, id, body) {
+    match index_rules_admin::update_index_rule(auth, id, body).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1327,7 +1343,7 @@ async fn delete_index_rule(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match index_rules_admin::delete_index_rule(auth, id) {
+    match index_rules_admin::delete_index_rule(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1339,7 +1355,7 @@ async fn admin_list_all_jobs(req: &mut Request, depot: &Depot, res: &mut Respons
     let q = req.query::<String>("q");
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match admin::list_all_index_jobs(auth, q.as_deref(), limit, cursor) {
+    match admin::list_all_index_jobs(auth, q.as_deref(), limit, cursor).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1355,7 +1371,7 @@ async fn admin_cancel_job(req: &mut Request, depot: &Depot, res: &mut Response) 
             return;
         }
     };
-    match admin::cancel_index_job(auth, id) {
+    match admin::cancel_index_job(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1371,7 +1387,7 @@ async fn admin_delete_repo(req: &mut Request, depot: &Depot, res: &mut Response)
             return;
         }
     };
-    match admin::delete_repo(auth, id) {
+    match admin::delete_repo(auth, id).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }
@@ -1510,7 +1526,7 @@ async fn record_view(req: &mut Request, depot: &Depot, res: &mut Response) {
             return;
         }
     };
-    match browse_history::record_view(auth, body) {
+    match browse_history::record_view(auth, body).await {
         Ok(()) => res.render(Json(json!({ "ok": true }))),
         Err(error) => render_error(res, error),
     }
@@ -1520,7 +1536,7 @@ async fn record_view(req: &mut Request, depot: &Depot, res: &mut Response) {
 async fn get_browse_history(req: &mut Request, depot: &Depot, res: &mut Response) {
     let auth = auth_from_depot(depot);
     let limit = req.query::<i64>("limit").unwrap_or(50);
-    match browse_history::get_history(auth, limit) {
+    match browse_history::get_history(auth, limit).await {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }

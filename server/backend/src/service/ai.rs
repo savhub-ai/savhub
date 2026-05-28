@@ -5,7 +5,7 @@
 //! a flock name and description.
 
 use chrono::Utc;
-use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -204,7 +204,7 @@ Respond with ONLY the JSON object, no markdown fences."#
 
     // Log AI usage
     if let Some(usage) = &chat_resp.usage
-        && let Ok(mut conn) = db_conn()
+        && let Ok(mut conn) = db_conn().await
     {
         let _ = diesel::insert_into(ai_usage_logs::table)
             .values(NewAiUsageLogRow {
@@ -219,10 +219,11 @@ Respond with ONLY the JSON object, no markdown fences."#
                 target_id: None,
                 created_at: Utc::now(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
-    let content = chat_resp.choices.first()?.message.content.clone();
+    let content = chat_resp.choices.iter().next()?.message.content.clone();
 
     println!("[ai] raw response: {content}");
 
@@ -320,7 +321,7 @@ Respond with ONLY the JSON object, no markdown fences."#
     let chat_resp: ChatResponse = response.json().await.ok()?;
 
     if let Some(usage) = &chat_resp.usage
-        && let Ok(mut conn) = db_conn()
+        && let Ok(mut conn) = db_conn().await
     {
         let _ = diesel::insert_into(ai_usage_logs::table)
             .values(NewAiUsageLogRow {
@@ -335,10 +336,11 @@ Respond with ONLY the JSON object, no markdown fences."#
                 target_id: None,
                 created_at: Utc::now(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
-    let content = chat_resp.choices.first()?.message.content.clone();
+    let content = chat_resp.choices.iter().next()?.message.content.clone();
     let json_str = content
         .trim()
         .trim_start_matches("```json")
