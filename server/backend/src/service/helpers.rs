@@ -429,7 +429,14 @@ pub async fn locate_skill_version(
             .get(tag)
             .ok_or_else(|| AppError::NotFound(format!("tag `{tag}` not found")))?
             .clone();
-        return Box::pin(locate_skill_version(conn, skill, Some(&version), None, viewer)).await;
+        return Box::pin(locate_skill_version(
+            conn,
+            skill,
+            Some(&version),
+            None,
+            viewer,
+        ))
+        .await;
     }
     fetch_skill_versions(conn, skill.id, viewer)
         .await?

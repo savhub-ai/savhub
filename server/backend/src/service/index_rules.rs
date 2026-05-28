@@ -1,6 +1,5 @@
 use diesel::prelude::*;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use regex::Regex;
 
 use crate::error::AppError;

@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use diesel::prelude::*;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use shared::{BrowseHistoryItem, BrowseHistoryResponse, RecordViewRequest};
 use uuid::Uuid;
 
@@ -51,7 +50,10 @@ pub async fn record_view(auth: &AuthContext, request: RecordViewRequest) -> Resu
 }
 
 /// Get a user's browse history, most recent first, limited to `limit` items.
-pub async fn get_history(auth: &AuthContext, limit: i64) -> Result<BrowseHistoryResponse, AppError> {
+pub async fn get_history(
+    auth: &AuthContext,
+    limit: i64,
+) -> Result<BrowseHistoryResponse, AppError> {
     let mut conn = db_conn().await?;
     get_history_for_user_id_with_conn(&mut conn, auth.user.id, limit).await
 }

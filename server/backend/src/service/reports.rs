@@ -1,7 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
 use shared::{
     CreateReportRequest, ReportDto, ReportListResponse, ReportReason, ReportStatus,

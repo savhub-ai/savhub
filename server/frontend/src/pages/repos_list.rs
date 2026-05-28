@@ -5,9 +5,7 @@ use savhub_shared::{
 };
 
 use crate::api;
-use crate::app::{
-    SCROLL_PAGE_SIZE, friendly_error, relative_time_i18n, repo_route, token_option,
-};
+use crate::app::{SCROLL_PAGE_SIZE, friendly_error, relative_time_i18n, repo_route, token_option};
 use crate::contexts::{ApiContext, I18nContext, ToastContext};
 use crate::location::{near_window_bottom, query_param, set_location_query};
 use crate::storage::{load_storage, save_storage};

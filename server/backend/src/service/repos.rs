@@ -226,7 +226,10 @@ pub async fn create_repo(
     get_repo_detail(&domain, &path_slug).await
 }
 
-pub async fn get_repo_detail(domain: &str, path_slug: &str) -> Result<RepoDetailResponse, AppError> {
+pub async fn get_repo_detail(
+    domain: &str,
+    path_slug: &str,
+) -> Result<RepoDetailResponse, AppError> {
     let mut conn = db_conn().await?;
     let repo_path = format!("{domain}/{path_slug}");
     let git_url = sign_to_git_url(domain, path_slug);
@@ -463,183 +466,183 @@ async fn persist_flock_import(
 
     conn.transaction::<_, AppError, _>(|conn| {
         async move {
-        if let Some(existing_flock) = &existing_flock {
-            diesel::update(flocks::table.find(existing_flock.id))
-                .set(&flock_changeset)
-                .execute(conn)
-                .await?;
+            if let Some(existing_flock) = &existing_flock {
+                diesel::update(flocks::table.find(existing_flock.id))
+                    .set(&flock_changeset)
+                    .execute(conn)
+                    .await?;
 
-            // Load existing skills indexed by path for upsert matching.
-            let existing_skills = skills::table
-                .filter(skills::flock_id.eq(existing_flock.id))
-                .filter(skills::repo_id.eq(repo.id))
-                .select(SkillRow::as_select())
-                .load::<SkillRow>(conn)
-                .await?;
-            let existing_by_path: HashMap<String, SkillRow> = existing_skills
-                .into_iter()
-                .map(|row| (row.path.clone(), row))
-                .collect();
+                // Load existing skills indexed by path for upsert matching.
+                let existing_skills = skills::table
+                    .filter(skills::flock_id.eq(existing_flock.id))
+                    .filter(skills::repo_id.eq(repo.id))
+                    .select(SkillRow::as_select())
+                    .load::<SkillRow>(conn)
+                    .await?;
+                let existing_by_path: HashMap<String, SkillRow> = existing_skills
+                    .into_iter()
+                    .map(|row| (row.path.clone(), row))
+                    .collect();
 
-            let mut incoming_paths = HashSet::new();
-            for skill in &skills {
-                incoming_paths.insert(skill.path.clone());
-                let skill_metadata = serde_json::to_value(skill.metadata.clone())
-                    .map_err(|error| AppError::Internal(error.to_string()))?;
-                let skill_runtime = skill
-                    .runtime
-                    .clone()
-                    .map(serde_json::to_value)
-                    .transpose()
-                    .map_err(|error| AppError::Internal(error.to_string()))?;
+                let mut incoming_paths = HashSet::new();
+                for skill in &skills {
+                    incoming_paths.insert(skill.path.clone());
+                    let skill_metadata = serde_json::to_value(skill.metadata.clone())
+                        .map_err(|error| AppError::Internal(error.to_string()))?;
+                    let skill_runtime = skill
+                        .runtime
+                        .clone()
+                        .map(serde_json::to_value)
+                        .transpose()
+                        .map_err(|error| AppError::Internal(error.to_string()))?;
 
-                if let Some(existing) = existing_by_path.get(&skill.path) {
-                    // Update existing skill, preserving stats/stars/comments etc.
-                    diesel::update(skills::table.find(existing.id))
-                        .set(SkillChangeset {
-                            slug: Some(skill.slug.clone()),
-                            name: Some(skill.name.clone()),
-                            path: Some(skill.path.clone()),
-                            description: Some(skill.description.clone()),
-                            version: skill.version.clone(),
-                            status: Some(status_to_str(skill.status).to_string()),
-                            license: Some(skill.license.clone()),
-                            source: Some(flock_source.clone()),
-                            metadata: Some(skill_metadata),
-                            runtime_data: Some(skill_runtime),
-                            updated_at: Some(now),
-                            ..Default::default()
-                        })
+                    if let Some(existing) = existing_by_path.get(&skill.path) {
+                        // Update existing skill, preserving stats/stars/comments etc.
+                        diesel::update(skills::table.find(existing.id))
+                            .set(SkillChangeset {
+                                slug: Some(skill.slug.clone()),
+                                name: Some(skill.name.clone()),
+                                path: Some(skill.path.clone()),
+                                description: Some(skill.description.clone()),
+                                version: skill.version.clone(),
+                                status: Some(status_to_str(skill.status).to_string()),
+                                license: Some(skill.license.clone()),
+                                source: Some(flock_source.clone()),
+                                metadata: Some(skill_metadata),
+                                runtime_data: Some(skill_runtime),
+                                updated_at: Some(now),
+                                ..Default::default()
+                            })
+                            .execute(conn)
+                            .await?;
+                    } else {
+                        // Insert new skill
+                        diesel::insert_into(skills::table)
+                            .values(NewSkillRow {
+                                id: Uuid::now_v7(),
+                                slug: skill.slug.clone(),
+                                name: skill.name.clone(),
+                                path: skill.path.clone(),
+                                keywords: vec![],
+                                repo_id: repo.id,
+                                flock_id,
+                                description: skill.description.clone(),
+                                version: skill.version.clone(),
+                                status: status_to_str(skill.status).to_string(),
+                                license: Some(skill.license.clone()),
+                                source: flock_source.clone(),
+                                metadata: skill_metadata,
+                                entry_data: None,
+                                runtime_data: skill_runtime,
+                                scan_commit_hash: String::new(),
+                                security_status: "unscanned".to_string(),
+                                latest_version_id: None,
+                                tags: serde_json::json!({}),
+                                moderation_status: "active".to_string(),
+                                highlighted: false,
+                                official: false,
+                                deprecated: false,
+                                suspicious: false,
+                                stats_downloads: 0,
+                                stats_stars: 0,
+                                stats_versions: 0,
+                                stats_comments: 0,
+                                stats_installs: 0,
+                                stats_unique_users: 0,
+                                soft_deleted_at: None,
+                                created_at: now,
+                                updated_at: now,
+                            })
+                            .execute(conn)
+                            .await?;
+                    }
+                }
+
+                // Remove skills whose path no longer exists in the new import
+                let removed_ids: Vec<Uuid> = existing_by_path
+                    .iter()
+                    .filter(|(path, _)| !incoming_paths.contains(path.as_str()))
+                    .map(|(_, row)| row.id)
+                    .collect();
+                if !removed_ids.is_empty() {
+                    diesel::delete(skills::table.filter(skills::id.eq_any(&removed_ids)))
                         .execute(conn)
                         .await?;
-                } else {
-                    // Insert new skill
+                }
+            } else {
+                diesel::insert_into(flocks::table)
+                    .values(&flock_row)
+                    .execute(conn)
+                    .await?;
+
+                let mut skill_rows = Vec::with_capacity(skills.len());
+                for skill in &skills {
+                    skill_rows.push(NewSkillRow {
+                        id: Uuid::now_v7(),
+                        slug: skill.slug.clone(),
+                        name: skill.name.clone(),
+                        path: skill.path.clone(),
+                        keywords: vec![],
+                        repo_id: repo.id,
+                        flock_id,
+                        description: skill.description.clone(),
+                        version: skill.version.clone(),
+                        status: status_to_str(skill.status).to_string(),
+                        license: Some(skill.license.clone()),
+                        source: flock_source.clone(),
+                        metadata: serde_json::to_value(skill.metadata.clone())
+                            .map_err(|error| AppError::Internal(error.to_string()))?,
+                        entry_data: None,
+                        runtime_data: skill
+                            .runtime
+                            .clone()
+                            .map(serde_json::to_value)
+                            .transpose()
+                            .map_err(|error| AppError::Internal(error.to_string()))?,
+                        scan_commit_hash: String::new(),
+                        security_status: "unscanned".to_string(),
+                        latest_version_id: None,
+                        tags: serde_json::json!({}),
+                        moderation_status: "active".to_string(),
+                        highlighted: false,
+                        official: false,
+                        deprecated: false,
+                        suspicious: false,
+                        stats_downloads: 0,
+                        stats_stars: 0,
+                        stats_versions: 0,
+                        stats_comments: 0,
+                        stats_installs: 0,
+                        stats_unique_users: 0,
+                        soft_deleted_at: None,
+                        created_at: now,
+                        updated_at: now,
+                    });
+                }
+                for chunk in skill_rows.chunks(500) {
                     diesel::insert_into(skills::table)
-                        .values(NewSkillRow {
-                            id: Uuid::now_v7(),
-                            slug: skill.slug.clone(),
-                            name: skill.name.clone(),
-                            path: skill.path.clone(),
-                            keywords: vec![],
-                            repo_id: repo.id,
-                            flock_id,
-                            description: skill.description.clone(),
-                            version: skill.version.clone(),
-                            status: status_to_str(skill.status).to_string(),
-                            license: Some(skill.license.clone()),
-                            source: flock_source.clone(),
-                            metadata: skill_metadata,
-                            entry_data: None,
-                            runtime_data: skill_runtime,
-                            scan_commit_hash: String::new(),
-                            security_status: "unscanned".to_string(),
-                            latest_version_id: None,
-                            tags: serde_json::json!({}),
-                            moderation_status: "active".to_string(),
-                            highlighted: false,
-                            official: false,
-                            deprecated: false,
-                            suspicious: false,
-                            stats_downloads: 0,
-                            stats_stars: 0,
-                            stats_versions: 0,
-                            stats_comments: 0,
-                            stats_installs: 0,
-                            stats_unique_users: 0,
-                            soft_deleted_at: None,
-                            created_at: now,
-                            updated_at: now,
-                        })
+                        .values(chunk)
                         .execute(conn)
                         .await?;
                 }
             }
 
-            // Remove skills whose path no longer exists in the new import
-            let removed_ids: Vec<Uuid> = existing_by_path
-                .iter()
-                .filter(|(path, _)| !incoming_paths.contains(path.as_str()))
-                .map(|(_, row)| row.id)
-                .collect();
-            if !removed_ids.is_empty() {
-                diesel::delete(skills::table.filter(skills::id.eq_any(&removed_ids)))
-                    .execute(conn)
-                    .await?;
-            }
-        } else {
-            diesel::insert_into(flocks::table)
-                .values(&flock_row)
-                .execute(conn)
-                .await?;
+            insert_audit_log(
+                conn,
+                Some(auth.user.id),
+                "flock.import",
+                "flock",
+                Some(flock_id),
+                json!({
+                    "repo": &repo.git_url,
+                    "flock_slug": flock_row.slug,
+                    "skill_count": skills.len(),
+                    "updated": updated_existing_flock,
+                }),
+            )
+            .await?;
 
-            let mut skill_rows = Vec::with_capacity(skills.len());
-            for skill in &skills {
-                skill_rows.push(NewSkillRow {
-                    id: Uuid::now_v7(),
-                    slug: skill.slug.clone(),
-                    name: skill.name.clone(),
-                    path: skill.path.clone(),
-                    keywords: vec![],
-                    repo_id: repo.id,
-                    flock_id,
-                    description: skill.description.clone(),
-                    version: skill.version.clone(),
-                    status: status_to_str(skill.status).to_string(),
-                    license: Some(skill.license.clone()),
-                    source: flock_source.clone(),
-                    metadata: serde_json::to_value(skill.metadata.clone())
-                        .map_err(|error| AppError::Internal(error.to_string()))?,
-                    entry_data: None,
-                    runtime_data: skill
-                        .runtime
-                        .clone()
-                        .map(serde_json::to_value)
-                        .transpose()
-                        .map_err(|error| AppError::Internal(error.to_string()))?,
-                    scan_commit_hash: String::new(),
-                    security_status: "unscanned".to_string(),
-                    latest_version_id: None,
-                    tags: serde_json::json!({}),
-                    moderation_status: "active".to_string(),
-                    highlighted: false,
-                    official: false,
-                    deprecated: false,
-                    suspicious: false,
-                    stats_downloads: 0,
-                    stats_stars: 0,
-                    stats_versions: 0,
-                    stats_comments: 0,
-                    stats_installs: 0,
-                    stats_unique_users: 0,
-                    soft_deleted_at: None,
-                    created_at: now,
-                    updated_at: now,
-                });
-            }
-            for chunk in skill_rows.chunks(500) {
-                diesel::insert_into(skills::table)
-                    .values(chunk)
-                    .execute(conn)
-                    .await?;
-            }
-        }
-
-        insert_audit_log(
-            conn,
-            Some(auth.user.id),
-            "flock.import",
-            "flock",
-            Some(flock_id),
-            json!({
-                "repo": &repo.git_url,
-                "flock_slug": flock_row.slug,
-                "skill_count": skills.len(),
-                "updated": updated_existing_flock,
-            }),
-        )
-        .await?;
-
-        Ok(())
+            Ok(())
         }
         .scope_boxed()
     })

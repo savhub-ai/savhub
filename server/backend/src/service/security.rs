@@ -345,7 +345,8 @@ pub async fn run_automated_scans_with_files(
                     version_id: skill_version_id,
                     commit_hash: commit_hash.clone().unwrap_or_default(),
                 })
-                .execute(&mut conn).await?;
+                .execute(&mut conn)
+                .await?;
         }
 
         // ----- License audit -----
@@ -374,7 +375,8 @@ pub async fn run_automated_scans_with_files(
                     version_id: skill_version_id,
                     commit_hash: commit_hash.clone().unwrap_or_default(),
                 })
-                .execute(&mut conn).await?;
+                .execute(&mut conn)
+                .await?;
         }
 
         // ----- Static scan (on actual file contents) -----
@@ -398,9 +400,9 @@ pub async fn run_automated_scans_with_files(
             };
             {
                 let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+                    .get()
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
                 diesel::insert_into(security_scans::table)
                     .values(NewSecurityScanRow {
                         id: Uuid::now_v7(),
@@ -420,7 +422,8 @@ pub async fn run_automated_scans_with_files(
                         version_id: scan_input.version_id,
                         commit_hash: commit_hash.clone().unwrap_or_default(),
                     })
-                    .execute(&mut conn).await?;
+                    .execute(&mut conn)
+                    .await?;
             }
 
             // Track worst verdict
@@ -440,12 +443,13 @@ pub async fn run_automated_scans_with_files(
             };
             {
                 let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+                    .get()
+                    .await
+                    .map_err(|e| AppError::Internal(e.to_string()))?;
                 diesel::update(skills::table.find(skill.id))
                     .set(skills::security_status.eq(security_status))
-                    .execute(&mut conn).await?;
+                    .execute(&mut conn)
+                    .await?;
             }
 
             // Write consolidated scan_summary to the skill_version row
@@ -456,7 +460,8 @@ pub async fn run_automated_scans_with_files(
                 {
                     let _ = diesel::update(skill_versions::table.find(vid))
                         .set(skill_versions::scan_summary.eq(Some(val)))
-                        .execute(&mut conn).await;
+                        .execute(&mut conn)
+                        .await;
                 }
             }
 
@@ -484,9 +489,9 @@ pub async fn run_automated_scans_with_files(
     let worst_str = worst_verdict.to_string();
     {
         let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::insert_into(security_scans::table)
             .values(NewSecurityScanRow {
                 id: Uuid::now_v7(),
@@ -504,7 +509,8 @@ pub async fn run_automated_scans_with_files(
                 version_id: None,
                 commit_hash: commit_hash.clone().unwrap_or_default(),
             })
-            .execute(&mut conn).await?;
+            .execute(&mut conn)
+            .await?;
     }
 
     // Update flock security_status. Static clean → "checked".
@@ -516,12 +522,13 @@ pub async fn run_automated_scans_with_files(
     };
     {
         let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(flocks::table.find(flock_id))
             .set(flocks::security_status.eq(flock_status))
-            .execute(&mut conn).await?;
+            .execute(&mut conn)
+            .await?;
     }
 
     Ok(worst_str)
@@ -642,9 +649,9 @@ pub async fn process_claimed_ai_scan_task(
 
     let (mut files, repo, static_result_opt) = {
         let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         let files = load_skill_files_from_versions(&mut conn, &skill).await;
         let repo = if files.is_empty() {
             fetch_repo_for_skill(&mut conn, &skill).await
@@ -666,12 +673,13 @@ pub async fn process_claimed_ai_scan_task(
             skill.slug,
         );
         let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(skills::table.find(skill.id))
             .set(skills::security_status.eq("checked"))
-            .execute(&mut conn).await?;
+            .execute(&mut conn)
+            .await?;
         return Ok(());
     }
 
@@ -691,12 +699,13 @@ pub async fn process_claimed_ai_scan_task(
             skill.slug,
         );
         let mut conn = pool
-                .get()
-                .await
-                .map_err(|e| AppError::Internal(e.to_string()))?;
+            .get()
+            .await
+            .map_err(|e| AppError::Internal(e.to_string()))?;
         diesel::update(skills::table.find(skill.id))
             .set(skills::security_status.eq("checked"))
-            .execute(&mut conn).await?;
+            .execute(&mut conn)
+            .await?;
         return Ok(());
     }
 
@@ -762,10 +771,12 @@ pub async fn process_claimed_ai_scan_task(
 
             diesel::update(skills::table.find(skill.id))
                 .set(skills::security_status.eq(final_status))
-                .execute(&mut conn).await?;
+                .execute(&mut conn)
+                .await?;
             diesel::update(flocks::table.find(skill.flock_id))
                 .set(flocks::security_status.eq(final_status))
-                .execute(&mut conn).await?;
+                .execute(&mut conn)
+                .await?;
 
             // Merge LLM verdict into the version scan_summary
             if let Some(vid) = skill.latest_version_id {

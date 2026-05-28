@@ -2,8 +2,7 @@ use std::collections::HashMap;
 
 use diesel::dsl::count_star;
 use diesel::prelude::*;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use shared::{
     CommentDto, FileContentResponse, FlockSummary, PagedResponse, ResolveResponse, ResolvedVersion,
     ResourceKind, SearchResponse, SearchResult, SkillDetailResponse, SkillListItem, WhoAmIResponse,

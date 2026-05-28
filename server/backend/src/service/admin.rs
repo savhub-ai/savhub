@@ -130,9 +130,7 @@ pub async fn update_skill_moderation(
     get_skill_detail_by_id(skill_id, Some(&auth.user)).await
 }
 
-pub async fn management_summary(
-    auth: &AuthContext,
-) -> Result<ManagementSummaryResponse, AppError> {
+pub async fn management_summary(auth: &AuthContext) -> Result<ManagementSummaryResponse, AppError> {
     if !matches!(auth.user.role, UserRole::Admin | UserRole::Moderator) {
         return Err(AppError::Forbidden(
             "moderator or admin access required".to_string(),

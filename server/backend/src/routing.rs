@@ -353,13 +353,15 @@ async fn download_bundle(req: &mut Request, res: &mut Response) {
         .and_then(|value| parse_kind(&value));
     let auth = optional_auth(req).await.ok().flatten();
     let result = match kind.unwrap_or(ResourceKind::Skill) {
-        ResourceKind::Skill => catalog::download_skill_bundle(
-            &slug,
-            version.as_deref(),
-            tag.as_deref(),
-            auth.as_ref().map(|ctx| &ctx.user),
-        )
-        .await,
+        ResourceKind::Skill => {
+            catalog::download_skill_bundle(
+                &slug,
+                version.as_deref(),
+                tag.as_deref(),
+                auth.as_ref().map(|ctx| &ctx.user),
+            )
+            .await
+        }
     };
 
     match result {
@@ -788,7 +790,8 @@ async fn get_user_history(req: &mut Request, res: &mut Response) {
     let auth = optional_auth(req).await.ok().flatten();
     let limit = req.query::<i64>("limit").unwrap_or(20);
     let cursor = req.query::<String>("cursor");
-    match users::get_user_history(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor).await {
+    match users::get_user_history(&handle, auth.as_ref().map(|ctx| &ctx.user), limit, cursor).await
+    {
         Ok(payload) => res.render(Json(payload)),
         Err(error) => render_error(res, error),
     }

@@ -3,8 +3,9 @@ use diesel::Connection;
 use diesel::pg::PgConnection;
 use diesel_async::AsyncPgConnection;
 use diesel_async::pooled_connection::AsyncDieselConnectionManager;
-use diesel_async::pooled_connection::bb8::Pool as AsyncPool;
-use diesel_async::pooled_connection::bb8::PooledConnection as AsyncPooledConnection;
+use diesel_async::pooled_connection::bb8::{
+    Pool as AsyncPool, PooledConnection as AsyncPooledConnection,
+};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 /// All runtime DB access uses this async bb8 pool over `diesel-async`.

@@ -9,7 +9,7 @@ use savhub_local::skills::inspect_zip;
 use savhub_shared::{FileContentResponse, SkillDetailResponse};
 use serde_json::json;
 
-use crate::{InspectArgs, GlobalOpts, normalize_slug, optional_client, truncate};
+use crate::{GlobalOpts, InspectArgs, normalize_slug, optional_client, truncate};
 
 pub(crate) async fn cmd_inspect(opts: &GlobalOpts, args: InspectArgs) -> Result<()> {
     if args.version.is_some() && args.tag.is_some() {

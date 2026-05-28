@@ -1,7 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
-use diesel_async::AsyncPgConnection;
-use diesel_async::RunQueryDsl;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use reqwest::Url;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
 use serde::Deserialize;
@@ -327,7 +326,10 @@ async fn unique_handle(conn: &mut AsyncPgConnection, base: &str) -> Result<Strin
     ))
 }
 
-async fn issue_github_token(conn: &mut AsyncPgConnection, user_id: Uuid) -> Result<String, AppError> {
+async fn issue_github_token(
+    conn: &mut AsyncPgConnection,
+    user_id: Uuid,
+) -> Result<String, AppError> {
     // Keep previous tokens so other clients (CLI, desktop) stay logged in.
     let token = format!("ghu_{}", Uuid::now_v7().simple());
     let token_hash = super::helpers::hash_string(&token);
