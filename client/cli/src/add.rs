@@ -8,9 +8,7 @@
 use anyhow::{Result, anyhow, bail};
 use clap::{ArgAction, Args, Subcommand};
 use dialoguer::{Confirm, Select};
-use savhub_local::project::{
-    ProjectAddedSkill, read_project_config, write_project_config_force,
-};
+use savhub_local::project::{ProjectAddedSkill, read_project_config, write_project_config_force};
 use savhub_local::registry::{self, FetchedSkillInfo, SkillSearchEntry};
 use savhub_local::selectors::SelectorSkillRef;
 use savhub_local::skills::copy_skill_folder;
@@ -74,10 +72,7 @@ pub(crate) fn cmd_add_skill(opts: &GlobalOpts, args: AddSkillArgs) -> Result<()>
 
     if !args.yes && opts.input_allowed {
         let proceed = Confirm::new()
-            .with_prompt(format!(
-                "Add skill `{}` from {}?",
-                chosen.slug, repo_url
-            ))
+            .with_prompt(format!("Add skill `{}` from {}?", chosen.slug, repo_url))
             .default(true)
             .interact()
             .map_err(|error| anyhow!("failed to read confirmation: {error}"))?;
@@ -111,7 +106,10 @@ pub(crate) fn cmd_add_skill(opts: &GlobalOpts, args: AddSkillArgs) -> Result<()>
 
     let fetched = registry::fetch_skills_batch(&[(repo_url.to_string(), skill_path.clone())])?;
     if fetched.is_empty() {
-        bail!("registry fetch produced no skill bundle for `{}`", chosen.slug);
+        bail!(
+            "registry fetch produced no skill bundle for `{}`",
+            chosen.slug
+        );
     }
     install_skills_into_project(&opts.workdir, &fetched)?;
 
@@ -136,10 +134,7 @@ pub(crate) fn cmd_add_flock(opts: &GlobalOpts, args: AddFlockArgs) -> Result<()>
 
     if !args.yes && opts.input_allowed {
         let proceed = Confirm::new()
-            .with_prompt(format!(
-                "Add flock `{}` from {}?",
-                chosen.slug, chosen.repo
-            ))
+            .with_prompt(format!("Add flock `{}` from {}?", chosen.slug, chosen.repo))
             .default(true)
             .interact()
             .map_err(|error| anyhow!("failed to read confirmation: {error}"))?;
@@ -300,7 +295,10 @@ fn pick_flock(
 /// Copy the freshly-fetched skills into each detected AI client's project
 /// skills directory and refresh `savhub.lock`. Mirrors `apply.rs` so a manual
 /// `add` lands the skills on disk without a follow-up `apply`.
-fn install_skills_into_project(workdir: &std::path::Path, fetched: &[FetchedSkillInfo]) -> Result<()> {
+fn install_skills_into_project(
+    workdir: &std::path::Path,
+    fetched: &[FetchedSkillInfo],
+) -> Result<()> {
     if fetched.is_empty() {
         return Ok(());
     }
@@ -317,10 +315,7 @@ fn install_skills_into_project(workdir: &std::path::Path, fetched: &[FetchedSkil
             std::fs::create_dir_all(&target_dir).ok();
             let target = target_dir.join(&info.slug);
             if let Err(e) = copy_skill_folder(&info.local_path, &target) {
-                eprintln!(
-                    "  ! {}: failed to copy to {}: {e}",
-                    info.slug, rel_dir
-                );
+                eprintln!("  ! {}: failed to copy to {}: {e}", info.slug, rel_dir);
             }
         }
         println!("  + {}", info.slug);

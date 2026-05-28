@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use serde_json::json;
 use shared::{BlockedFlockDto, DeleteResponse, FlockBlockListResponse};
 use uuid::Uuid;
@@ -10,15 +11,15 @@ use crate::error::AppError;
 use crate::models::{FlockRow, NewSkillBlockRow, RepoRow, SkillBlockRow};
 use crate::schema::{flocks, repos, skill_blocks};
 
-pub fn block_flock(
+pub async fn block_flock(
     auth: &AuthContext,
     repo_domain: &str,
     repo_path_slug: &str,
     flock_slug: &str,
 ) -> Result<DeleteResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
-    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug)?;
+    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
     let existing = skill_blocks::table
         .filter(skill_blocks::user_id.eq(auth.user.id))
@@ -26,6 +27,7 @@ pub fn block_flock(
         .filter(skill_blocks::skill_id.is_null())
         .select(SkillBlockRow::as_select())
         .first::<SkillBlockRow>(&mut conn)
+        .await
         .optional()?;
     if existing.is_some() {
         return Err(AppError::Conflict("flock is already blocked".to_string()));
@@ -40,7 +42,8 @@ pub fn block_flock(
             skill_id: None,
             created_at: Utc::now(),
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -49,20 +52,21 @@ pub fn block_flock(
         "flock",
         Some(flock.id),
         json!({ "repo": format!("{}/{}", repo_domain, repo_path_slug), "flock_slug": flock_slug }),
-    )?;
+    )
+    .await?;
 
     Ok(DeleteResponse { ok: true })
 }
 
-pub fn unblock_flock(
+pub async fn unblock_flock(
     auth: &AuthContext,
     repo_domain: &str,
     repo_path_slug: &str,
     flock_slug: &str,
 ) -> Result<DeleteResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign = format!("{repo_domain}/{repo_path_slug}");
-    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug)?;
+    let flock = fetch_flock_by_path(&mut conn, &repo_sign, flock_slug).await?;
 
     let deleted = diesel::delete(
         skill_blocks::table
@@ -70,7 +74,8 @@ pub fn unblock_flock(
             .filter(skill_blocks::flock_id.eq(flock.id))
             .filter(skill_blocks::skill_id.is_null()),
     )
-    .execute(&mut conn)?;
+    .execute(&mut conn)
+    .await?;
 
     if deleted == 0 {
         return Err(AppError::NotFound("flock is not blocked".to_string()));
@@ -83,19 +88,21 @@ pub fn unblock_flock(
         "flock",
         Some(flock.id),
         json!({ "repo": format!("{}/{}", repo_domain, repo_path_slug), "flock_slug": flock_slug }),
-    )?;
+    )
+    .await?;
 
     Ok(DeleteResponse { ok: true })
 }
 
-pub fn list_blocked_flocks(auth: &AuthContext) -> Result<FlockBlockListResponse, AppError> {
-    let mut conn = db_conn()?;
+pub async fn list_blocked_flocks(auth: &AuthContext) -> Result<FlockBlockListResponse, AppError> {
+    let mut conn = db_conn().await?;
     let rows = skill_blocks::table
         .filter(skill_blocks::user_id.eq(auth.user.id))
         .filter(skill_blocks::skill_id.is_null())
         .order(skill_blocks::created_at.desc())
         .select(SkillBlockRow::as_select())
-        .load::<SkillBlockRow>(&mut conn)?;
+        .load::<SkillBlockRow>(&mut conn)
+        .await?;
 
     let flock_ids: Vec<Uuid> = rows.iter().map(|r| r.flock_id).collect();
     if flock_ids.is_empty() {
@@ -107,12 +114,14 @@ pub fn list_blocked_flocks(auth: &AuthContext) -> Result<FlockBlockListResponse,
     let flock_rows = flocks::table
         .filter(flocks::id.eq_any(&flock_ids))
         .select(FlockRow::as_select())
-        .load::<FlockRow>(&mut conn)?;
+        .load::<FlockRow>(&mut conn)
+        .await?;
     let repo_ids: Vec<Uuid> = flock_rows.iter().map(|f| f.repo_id).collect();
     let repo_rows = repos::table
         .filter(repos::id.eq_any(&repo_ids))
         .select(RepoRow::as_select())
-        .load::<RepoRow>(&mut conn)?;
+        .load::<RepoRow>(&mut conn)
+        .await?;
 
     let blocked_flocks = rows
         .into_iter()

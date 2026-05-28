@@ -6,8 +6,7 @@
 //!
 //! They live in this separate module instead of being deleted because:
 //!   - the backend endpoints are stable and these are the canonical clients;
-//!   - re-implementing them later would be more expensive than keeping them
-//!     compiling.
+//!   - re-implementing them later would be more expensive than keeping them compiling.
 //!
 //! To re-enable any of them: add a variant to `Command` in `main.rs`, dispatch
 //! to the corresponding `cmd_*` function below, and remove its
@@ -623,4 +622,3 @@ fn parse_role_arg(value: &str) -> Result<UserRole> {
         _ => bail!("role must be one of: user, moderator, admin"),
     }
 }
-

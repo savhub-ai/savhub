@@ -7,7 +7,7 @@
 use std::sync::LazyLock;
 
 use chrono::Utc;
-use diesel::prelude::*;
+use diesel_async::RunQueryDsl;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -652,7 +652,7 @@ pub async fn evaluate_skill_with_llm(
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         let err_msg = format!("LLM API error ({status}): {}", take_chars(&body, 200));
-        store_llm_error(&err_msg, skill_id, flock_id, model);
+        store_llm_error(&err_msg, skill_id, flock_id, model).await;
         return Err(AppError::Internal(err_msg));
     }
 
@@ -663,7 +663,7 @@ pub async fn evaluate_skill_with_llm(
 
     // Log AI token usage
     if let Some(usage) = &chat_resp.usage
-        && let Ok(mut conn) = db_conn()
+        && let Ok(mut conn) = db_conn().await
     {
         let _ = diesel::insert_into(ai_usage_logs::table)
             .values(NewAiUsageLogRow {
@@ -678,34 +678,42 @@ pub async fn evaluate_skill_with_llm(
                 target_id: Some(skill_id),
                 created_at: Utc::now(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 
     let raw_content = chat_resp
         .choices
-        .first()
+        .iter()
+        .next()
         .map(|c| c.message.content.clone())
         .unwrap_or_default();
 
     if raw_content.is_empty() {
         let err_msg = "Empty response from LLM";
-        store_llm_error(err_msg, skill_id, flock_id, model);
+        store_llm_error(err_msg, skill_id, flock_id, model).await;
         return Err(AppError::Internal(err_msg.into()));
     }
 
-    let result = parse_llm_eval_response(&raw_content).ok_or_else(|| {
-        tracing::error!(
-            "[llm_eval] parse failure, raw (first 500 chars): {}",
-            take_chars(&raw_content, 500)
-        );
-        store_llm_error(
-            "Failed to parse LLM evaluation response",
-            skill_id,
-            flock_id,
-            model,
-        );
-        AppError::Internal("Failed to parse LLM evaluation response".into())
-    })?;
+    let result = match parse_llm_eval_response(&raw_content) {
+        Some(result) => result,
+        None => {
+            tracing::error!(
+                "[llm_eval] parse failure, raw (first 500 chars): {}",
+                take_chars(&raw_content, 500)
+            );
+            store_llm_error(
+                "Failed to parse LLM evaluation response",
+                skill_id,
+                flock_id,
+                model,
+            )
+            .await;
+            return Err(AppError::Internal(
+                "Failed to parse LLM evaluation response".into(),
+            ));
+        }
+    };
 
     // Store result in security_scans table
     let details = json!({
@@ -720,7 +728,7 @@ pub async fn evaluate_skill_with_llm(
         "static_scan_verdict": static_scan.map(|s| s.verdict.to_string()),
     });
 
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     diesel::insert_into(security_scans::table)
         .values(NewSecurityScanRow {
             id: Uuid::now_v7(),
@@ -739,7 +747,8 @@ pub async fn evaluate_skill_with_llm(
             version_id: None,
             commit_hash: String::new(),
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     tracing::info!(
         "[llm_eval] evaluated {}: {} ({} confidence)",
@@ -751,9 +760,9 @@ pub async fn evaluate_skill_with_llm(
     Ok(result)
 }
 
-fn store_llm_error(message: &str, skill_id: Uuid, flock_id: Uuid, model: &str) {
+async fn store_llm_error(message: &str, skill_id: Uuid, flock_id: Uuid, model: &str) {
     tracing::error!("[llm_eval] {message}");
-    if let Ok(mut conn) = db_conn() {
+    if let Ok(mut conn) = db_conn().await {
         let _ = diesel::insert_into(security_scans::table)
             .values(NewSecurityScanRow {
                 id: Uuid::now_v7(),
@@ -772,7 +781,8 @@ fn store_llm_error(message: &str, skill_id: Uuid, flock_id: Uuid, model: &str) {
                 version_id: None,
                 commit_hash: String::new(),
             })
-            .execute(&mut conn);
+            .execute(&mut conn)
+            .await;
     }
 }
 

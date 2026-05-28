@@ -21,9 +21,7 @@ use savhub_local::project::{
     write_project_added_skills,
 };
 use savhub_local::registry::{fetch_version_label, install_remote_skill_from_repo};
-use savhub_local::skills::{
-    LockSkill, RepoSkillOrigin, read_lockfile, write_repo_skill_origin,
-};
+use savhub_local::skills::{LockSkill, RepoSkillOrigin, read_lockfile, write_repo_skill_origin};
 use savhub_shared::{
     PagedResponse, RemoteSkillFetchSpec, RepoDetailResponse, SearchResponse, SkillDetailResponse,
     SkillListItem,
@@ -1041,7 +1039,6 @@ async fn cmd_explore(opts: &GlobalOpts, args: ExploreArgs) -> Result<()> {
     Ok(())
 }
 
-
 // Dormant admin commands (publish / moderate / sync / ban / role flows) moved
 // to `admin.rs`. They are kept compiling but not wired into the `Command`
 // enum; see that module's header for the rationale and how to re-enable them.
@@ -1130,7 +1127,6 @@ async fn resolve_remote_skill_fetch(
     })
 }
 
-
 pub(crate) fn authed_client(opts: &GlobalOpts) -> Result<ApiClient> {
     Ok(ApiClient::new(&opts.api_base, Some(require_auth_token()?)))
 }
@@ -1160,7 +1156,11 @@ pub(crate) fn normalize_slug(value: &str) -> Result<String> {
     Ok(slug)
 }
 
-pub(crate) fn ensure_confirmed(input_allowed: bool, prompt: &str, disabled_message: &str) -> Result<()> {
+pub(crate) fn ensure_confirmed(
+    input_allowed: bool,
+    prompt: &str,
+    disabled_message: &str,
+) -> Result<()> {
     if !input_allowed {
         bail!(disabled_message.to_string());
     }
@@ -1183,7 +1183,6 @@ fn map_explore_sort(value: &str) -> &'static str {
         _ => "updated",
     }
 }
-
 
 fn relative_time(timestamp: DateTime<Utc>) -> String {
     let now = Utc::now();

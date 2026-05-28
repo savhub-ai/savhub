@@ -1,4 +1,5 @@
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use regex::Regex;
 
 use crate::error::AppError;
@@ -40,8 +41,8 @@ struct RuleMatch {
 /// When the user submits a job, we find all rules for that repo, then
 /// pick the best regex match against the subdir. The matched rule's
 /// strategy determines how skills are grouped into flocks.
-pub fn resolve_index_rule(
-    conn: &mut PgConnection,
+pub async fn resolve_index_rule(
+    conn: &mut AsyncPgConnection,
     git_url: &str,
     subdir: &str,
 ) -> Result<ResolvedRule, AppError> {
@@ -56,7 +57,8 @@ pub fn resolve_index_rule(
     let rules = index_rules::table
         .filter(index_rules::repo_url.eq(&normalized_url))
         .select(IndexRuleRow::as_select())
-        .load::<IndexRuleRow>(conn)?;
+        .load::<IndexRuleRow>(conn)
+        .await?;
 
     println!(
         "[index_rules] found {} rule(s) for '{}'",
@@ -74,6 +76,7 @@ pub fn resolve_index_rule(
     let all_rules = index_rules::table
         .select(IndexRuleRow::as_select())
         .load::<IndexRuleRow>(conn)
+        .await
         .unwrap_or_default();
     println!("[index_rules] total rules in DB: {}", all_rules.len());
     for r in &all_rules {

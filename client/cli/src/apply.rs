@@ -12,8 +12,7 @@ use savhub_local::registry;
 use savhub_local::selectors::run_selectors;
 use serde_json::json;
 
-use crate::tui;
-use crate::{ApplyArgs, GlobalOpts, optional_client};
+use crate::{ApplyArgs, GlobalOpts, optional_client, tui};
 
 pub(crate) fn cmd_apply(opts: &GlobalOpts, mut args: ApplyArgs) -> Result<()> {
     // Trim and deduplicate all list args
@@ -325,9 +324,7 @@ pub(crate) fn cmd_apply(opts: &GlobalOpts, mut args: ApplyArgs) -> Result<()> {
         } else {
             added.path.clone()
         };
-        skill_map
-            .entry(added.slug.clone())
-            .or_insert((repo, path));
+        skill_map.entry(added.slug.clone()).or_insert((repo, path));
     }
     for flock_slug in &existing_config.flocks.manual_added {
         let flock_ref = savhub_local::selectors::SelectorSkillRef::parse(flock_slug);

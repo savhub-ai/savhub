@@ -11,8 +11,7 @@ use savhub_local::api::ApiClient;
 use savhub_local::config::{read_global_config, write_global_config};
 use savhub_shared::WhoAmIResponse;
 
-use crate::oauth;
-use crate::{GlobalOpts, LoginArgs, authed_client};
+use crate::{GlobalOpts, LoginArgs, authed_client, oauth};
 
 pub(crate) async fn cmd_login(opts: &GlobalOpts, args: LoginArgs) -> Result<()> {
     if args.token.is_some() {

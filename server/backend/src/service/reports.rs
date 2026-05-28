@@ -1,5 +1,6 @@
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
 use shared::{
     CreateReportRequest, ReportDto, ReportListResponse, ReportReason, ReportStatus,
@@ -13,11 +14,11 @@ use crate::error::AppError;
 use crate::models::{NewReportRow, ReportRow};
 use crate::schema::reports;
 
-pub fn create_report(
+pub async fn create_report(
     auth: &AuthContext,
     request: CreateReportRequest,
 ) -> Result<ReportDto, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let now = Utc::now();
     let id = Uuid::now_v7();
 
@@ -28,6 +29,7 @@ pub fn create_report(
         .filter(reports::status.eq("pending"))
         .select(ReportRow::as_select())
         .first::<ReportRow>(&mut conn)
+        .await
         .optional()?;
     if existing.is_some() {
         return Err(AppError::Conflict(
@@ -49,7 +51,8 @@ pub fn create_report(
             notes: None,
             created_at: now,
         })
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -62,16 +65,18 @@ pub fn create_report(
             "target_id": request.target_id,
             "reason": reason_to_str(request.reason),
         }),
-    )?;
+    )
+    .await?;
 
     let row = reports::table
         .find(id)
         .select(ReportRow::as_select())
-        .first::<ReportRow>(&mut conn)?;
-    report_dto_from_row(&mut conn, row)
+        .first::<ReportRow>(&mut conn)
+        .await?;
+    report_dto_from_row(&mut conn, row).await
 }
 
-pub fn list_reports(auth: &AuthContext) -> Result<ReportListResponse, AppError> {
+pub async fn list_reports(auth: &AuthContext) -> Result<ReportListResponse, AppError> {
     if !matches!(
         auth.user.role,
         shared::UserRole::Admin | shared::UserRole::Moderator
@@ -80,22 +85,23 @@ pub fn list_reports(auth: &AuthContext) -> Result<ReportListResponse, AppError> 
             "moderator or admin access required".to_string(),
         ));
     }
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let rows = reports::table
         .order(reports::created_at.desc())
         .limit(100)
         .select(ReportRow::as_select())
-        .load::<ReportRow>(&mut conn)?;
+        .load::<ReportRow>(&mut conn)
+        .await?;
 
-    let reports = rows
-        .into_iter()
-        .map(|row| report_dto_from_row(&mut conn, row))
-        .collect::<Result<Vec<_>, AppError>>()?;
+    let mut reports = Vec::with_capacity(rows.len());
+    for row in rows {
+        reports.push(report_dto_from_row(&mut conn, row).await?);
+    }
 
     Ok(ReportListResponse { reports })
 }
 
-pub fn review_report(
+pub async fn review_report(
     auth: &AuthContext,
     report_id: Uuid,
     request: ReviewReportRequest,
@@ -108,11 +114,12 @@ pub fn review_report(
             "moderator or admin access required".to_string(),
         ));
     }
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let report = reports::table
         .find(report_id)
         .select(ReportRow::as_select())
         .first::<ReportRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("report not found".to_string()))?;
     if report.status != "pending" {
@@ -129,7 +136,8 @@ pub fn review_report(
             reports::reviewed_at.eq(Some(now)),
             reports::notes.eq(request.notes.as_deref()),
         ))
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -141,21 +149,26 @@ pub fn review_report(
             "status": report_status_to_str(request.status),
             "notes": request.notes,
         }),
-    )?;
+    )
+    .await?;
 
     let row = reports::table
         .find(report_id)
         .select(ReportRow::as_select())
-        .first::<ReportRow>(&mut conn)?;
-    report_dto_from_row(&mut conn, row)
+        .first::<ReportRow>(&mut conn)
+        .await?;
+    report_dto_from_row(&mut conn, row).await
 }
 
-fn report_dto_from_row(conn: &mut PgConnection, row: ReportRow) -> Result<ReportDto, AppError> {
+async fn report_dto_from_row(
+    conn: &mut AsyncPgConnection,
+    row: ReportRow,
+) -> Result<ReportDto, AppError> {
     let mut user_ids = vec![row.reporter_user_id];
     if let Some(reviewer_id) = row.reviewed_by_user_id {
         user_ids.push(reviewer_id);
     }
-    let users = load_users_map(conn, user_ids)?;
+    let users = load_users_map(conn, user_ids).await?;
     let reporter = users
         .get(&row.reporter_user_id)
         .ok_or_else(|| AppError::Internal("missing reporter".to_string()))?;

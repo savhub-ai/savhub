@@ -728,11 +728,7 @@ pub fn enable_fetched_flock_in_project(
         .repos
         .iter()
         .find(|repo| repo.git_url == repo_url)
-        .and_then(|repo| {
-            repo.flocks
-                .iter()
-                .find(|flock| flock.path == flock_slug)
-        });
+        .and_then(|repo| repo.flocks.iter().find(|flock| flock.path == flock_slug));
 
     let token = format!("{repo_url}:{flock_slug}");
     let mut config = read_project_config(workdir)?;

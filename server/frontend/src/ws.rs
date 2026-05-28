@@ -68,8 +68,7 @@ fn connect_ws(mut ws_events: crate::contexts::WsIndexEvents) {
     let onmessage =
         Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
             if let Some(text) = event.data().as_string() {
-                if let Ok(evt) =
-                    serde_json::from_str::<crate::contexts::IndexProgressEvent>(&text)
+                if let Ok(evt) = serde_json::from_str::<crate::contexts::IndexProgressEvent>(&text)
                 {
                     let key = evt.job_id.to_string();
                     if !evt.progress_message.is_empty() {

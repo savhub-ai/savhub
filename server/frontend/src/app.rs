@@ -19,6 +19,10 @@ use crate::contexts::{
     ToastContext, ToastKind, WsIndexEvents,
 };
 use crate::i18n::{Lang, T};
+use crate::location::{
+    clear_location_hash, clear_location_query, current_hash, current_origin, current_page_url,
+    current_query, parse_hash_params,
+};
 use crate::pages::admin::{AdminIndexRulesPage, AdminOverviewPage, AdminUsersPage};
 use crate::pages::cards::FlockCard;
 use crate::pages::docs::DocsPage;
@@ -32,10 +36,6 @@ use crate::pages::repos_list::ReposPage;
 use crate::pages::skill::SkillPage;
 use crate::pages::skills_list::SkillsPage;
 use crate::pages::user::UserPage;
-use crate::location::{
-    clear_location_hash, clear_location_query, current_hash, current_origin, current_page_url,
-    current_query, parse_hash_params,
-};
 use crate::storage::{browser_storage, load_storage, remove_storage, save_storage};
 use crate::urls::strip_url_scheme_keep_git;
 use crate::ws::start_ws_connection;
@@ -564,7 +564,9 @@ fn AppShell() -> Element {
     }
 }
 
-pub(crate) fn render_flock_cards(resource: &Resource<Result<PagedResponse<FlockSummary>, String>>) -> Element {
+pub(crate) fn render_flock_cards(
+    resource: &Resource<Result<PagedResponse<FlockSummary>, String>>,
+) -> Element {
     let t = use_context::<I18nContext>().t();
     match &*resource.read_unchecked() {
         Some(Ok(payload)) => rsx! {
@@ -1159,10 +1161,6 @@ pub(crate) fn short_repo_name(url: &str) -> &str {
     url.rsplit('/').next().unwrap_or(url)
 }
 
-
-
-
-
 #[component]
 pub(crate) fn MetadataPanel(metadata: BundleMetadata) -> Element {
     let t = use_context::<I18nContext>().t();
@@ -1327,4 +1325,3 @@ pub(crate) fn CommentsList(
         }
     }
 }
-

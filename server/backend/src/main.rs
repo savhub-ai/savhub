@@ -3,7 +3,7 @@ use salvo::cors::{Any, Cors};
 use salvo::http::Method;
 use salvo::prelude::*;
 use server::config::Config;
-use server::db::{configured_pool_max_size, new_async_pool, new_pool, run_migrations};
+use server::db::{configured_pool_max_size, new_async_pool, run_migrations};
 use server::seed::ensure_seed_data;
 use server::state::init_state;
 
@@ -35,11 +35,7 @@ async fn main() -> Result<()> {
     }
 
     let db_pool_max_size = configured_pool_max_size();
-    let pool = new_pool(&config.database_url)?;
-    {
-        let mut conn = pool.get()?;
-        run_migrations(&mut conn)?;
-    }
+    run_migrations(&config.database_url)?;
     tracing::info!("  database        = connected, migrations applied");
     tracing::info!("  db_pool_max_size = {}", db_pool_max_size);
     tracing::info!(
@@ -98,18 +94,18 @@ async fn main() -> Result<()> {
     }
 
     let async_pool = new_async_pool(&config.database_url).await?;
-    tracing::info!("  async_db_pool   = ready (C2 phase 0)");
-    let _state = init_state(config.clone(), pool.clone(), async_pool)?;
+    tracing::info!("  async_db_pool   = ready");
+    let _state = init_state(config.clone(), async_pool.clone())?;
     // Backfill repos.git_sha for any rows that are still NULL.
     {
-        let pool = pool.clone();
+        let pool = async_pool.clone();
         tokio::spawn(async move {
             if let Err(e) = server::service::upgrade::backfill_repo_git_sha(&pool).await {
                 tracing::error!("backfill_repo_git_sha failed: {e}");
             }
         });
     }
-    ensure_seed_data(&pool)?;
+    ensure_seed_data(&async_pool).await?;
     let cors = Cors::new()
         .allow_origin(config.frontend_origin.as_str())
         .allow_methods(vec![
@@ -121,7 +117,7 @@ async fn main() -> Result<()> {
         .allow_headers(Any)
         .into_handler();
 
-    let _worker = server::worker::spawn_worker(pool.clone());
+    let _worker = server::worker::spawn_worker(async_pool.clone());
 
     let acceptor = TcpListener::new(config.bind.clone()).bind().await;
     tracing::info!("savhub backend listening on {}", config.bind);

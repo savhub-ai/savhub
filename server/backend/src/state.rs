@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::db::{AsyncPgPool, PgPool, run_migrations};
+use crate::db::{AsyncPgPool, run_migrations};
 
 /// Real-time event broadcast to WebSocket clients.
 #[derive(Clone, Debug, Serialize)]
@@ -29,9 +29,7 @@ pub enum WsEvent {
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
-    pub pool: PgPool,
-    /// C2 phase 0: async pool used by ported modules. Lives alongside the
-    /// sync `pool` until every service is migrated.
+    /// Async bb8 pool backing every handler and the background worker.
     pub async_pool: AsyncPgPool,
     pub events_tx: broadcast::Sender<WsEvent>,
     /// Per-repo locks that serialise clone/pull operations so that
@@ -60,13 +58,12 @@ impl AppState {
 
 static APP_STATE: OnceCell<Arc<AppState>> = OnceCell::new();
 
-pub fn init_state(config: Config, pool: PgPool, async_pool: AsyncPgPool) -> Result<Arc<AppState>> {
+pub fn init_state(config: Config, async_pool: AsyncPgPool) -> Result<Arc<AppState>> {
     let (events_tx, _) = broadcast::channel::<WsEvent>(256);
     let ai_chat_concurrency = config.ai_chat_concurrency.max(1);
     let ai_security_concurrency = config.ai_security_concurrency.max(1);
     let state = Arc::new(AppState {
         config,
-        pool,
         async_pool,
         events_tx,
         repo_checkout_locks: Arc::new(Mutex::new(HashMap::new())),
@@ -87,9 +84,5 @@ pub fn app_state() -> &'static Arc<AppState> {
 
 pub fn migrate_app_db() -> Result<()> {
     let state = app_state();
-    let mut conn = state
-        .pool
-        .get()
-        .map_err(|error| anyhow!("failed to get a DB connection for migrations: {error}"))?;
-    run_migrations(&mut conn)
+    run_migrations(&state.config.database_url)
 }

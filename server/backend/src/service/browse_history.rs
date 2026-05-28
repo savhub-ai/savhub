@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use shared::{BrowseHistoryItem, BrowseHistoryResponse, RecordViewRequest};
 use uuid::Uuid;
 
@@ -13,8 +14,8 @@ use crate::schema::{browse_histories, flocks, repos, skills};
 
 /// Record a page view. Upserts: if the same user+resource already exists,
 /// update the viewed_at timestamp instead of inserting a duplicate.
-pub fn record_view(auth: &AuthContext, request: RecordViewRequest) -> Result<(), AppError> {
-    let mut conn = db_conn()?;
+pub async fn record_view(auth: &AuthContext, request: RecordViewRequest) -> Result<(), AppError> {
+    let mut conn = db_conn().await?;
     let now = Utc::now();
 
     // Check for existing entry for this user + resource
@@ -24,12 +25,14 @@ pub fn record_view(auth: &AuthContext, request: RecordViewRequest) -> Result<(),
         .filter(browse_histories::resource_id.eq(request.resource_id))
         .select(BrowseHistoryRow::as_select())
         .first::<BrowseHistoryRow>(&mut conn)
+        .await
         .optional()?;
 
     if let Some(row) = existing {
         diesel::update(browse_histories::table.find(row.id))
             .set(browse_histories::viewed_at.eq(now))
-            .execute(&mut conn)?;
+            .execute(&mut conn)
+            .await?;
     } else {
         diesel::insert_into(browse_histories::table)
             .values(NewBrowseHistoryRow {
@@ -39,28 +42,32 @@ pub fn record_view(auth: &AuthContext, request: RecordViewRequest) -> Result<(),
                 resource_id: request.resource_id,
                 viewed_at: now,
             })
-            .execute(&mut conn)?;
+            .execute(&mut conn)
+            .await?;
     }
 
     Ok(())
 }
 
 /// Get a user's browse history, most recent first, limited to `limit` items.
-pub fn get_history(auth: &AuthContext, limit: i64) -> Result<BrowseHistoryResponse, AppError> {
-    let mut conn = db_conn()?;
-    get_history_for_user_id_with_conn(&mut conn, auth.user.id, limit)
+pub async fn get_history(
+    auth: &AuthContext,
+    limit: i64,
+) -> Result<BrowseHistoryResponse, AppError> {
+    let mut conn = db_conn().await?;
+    get_history_for_user_id_with_conn(&mut conn, auth.user.id, limit).await
 }
 
-pub fn get_history_for_user_id(
+pub async fn get_history_for_user_id(
     user_id: Uuid,
     limit: i64,
 ) -> Result<BrowseHistoryResponse, AppError> {
-    let mut conn = db_conn()?;
-    get_history_for_user_id_with_conn(&mut conn, user_id, limit)
+    let mut conn = db_conn().await?;
+    get_history_for_user_id_with_conn(&mut conn, user_id, limit).await
 }
 
-pub fn get_history_for_user_id_with_conn(
-    conn: &mut PgConnection,
+pub async fn get_history_for_user_id_with_conn(
+    conn: &mut AsyncPgConnection,
     user_id: Uuid,
     limit: i64,
 ) -> Result<BrowseHistoryResponse, AppError> {
@@ -69,24 +76,26 @@ pub fn get_history_for_user_id_with_conn(
         .order(browse_histories::viewed_at.desc())
         .limit(limit.clamp(1, 200))
         .select(BrowseHistoryRow::as_select())
-        .load::<BrowseHistoryRow>(conn)?;
+        .load::<BrowseHistoryRow>(conn)
+        .await?;
 
     Ok(BrowseHistoryResponse {
-        items: hydrate_history_items_for_user_page(conn, rows)?,
+        items: hydrate_history_items_for_user_page(conn, rows).await?,
     })
 }
 
 /// Delete browse_histories entries older than 365 days.
-pub fn cleanup_old_history(conn: &mut PgConnection) -> Result<usize, AppError> {
+pub async fn cleanup_old_history(conn: &mut AsyncPgConnection) -> Result<usize, AppError> {
     let cutoff = Utc::now() - chrono::Duration::days(365);
     let deleted =
         diesel::delete(browse_histories::table.filter(browse_histories::viewed_at.lt(cutoff)))
-            .execute(conn)?;
+            .execute(conn)
+            .await?;
     Ok(deleted)
 }
 
-pub(crate) fn hydrate_history_items_for_user_page(
-    conn: &mut PgConnection,
+pub(crate) async fn hydrate_history_items_for_user_page(
+    conn: &mut AsyncPgConnection,
     rows: Vec<BrowseHistoryRow>,
 ) -> Result<Vec<BrowseHistoryItem>, AppError> {
     if rows.is_empty() {
@@ -115,7 +124,8 @@ pub(crate) fn hydrate_history_items_for_user_page(
         skills::table
             .filter(skills::id.eq_any(&skill_ids))
             .select(SkillRow::as_select())
-            .load::<SkillRow>(conn)?
+            .load::<SkillRow>(conn)
+            .await?
     };
     let flock_rows = if flock_ids.is_empty() {
         Vec::new()
@@ -123,7 +133,8 @@ pub(crate) fn hydrate_history_items_for_user_page(
         flocks::table
             .filter(flocks::id.eq_any(&flock_ids))
             .select(FlockRow::as_select())
-            .load::<FlockRow>(conn)?
+            .load::<FlockRow>(conn)
+            .await?
     };
     let repo_rows = if repo_ids.is_empty() {
         Vec::new()
@@ -131,14 +142,15 @@ pub(crate) fn hydrate_history_items_for_user_page(
         repos::table
             .filter(repos::id.eq_any(&repo_ids))
             .select(RepoRow::as_select())
-            .load::<RepoRow>(conn)?
+            .load::<RepoRow>(conn)
+            .await?
     };
 
     let user_ids = flock_rows
         .iter()
         .map(|row| row.imported_by_user_id)
         .collect::<Vec<_>>();
-    let users = load_users_map(conn, user_ids)?;
+    let users = load_users_map(conn, user_ids).await?;
 
     let skill_map = skill_rows
         .into_iter()

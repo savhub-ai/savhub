@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 use diesel::prelude::*;
+use diesel_async::{AsyncConnection, AsyncPgConnection, RunQueryDsl};
 use serde_json::json;
 use shared::{
     CatalogSource, CreateRepoRequest, FlockDetailResponse, FlockDocument, FlockMetadata,
@@ -26,12 +27,12 @@ use crate::models::{
 };
 use crate::schema::{flocks, repos, skills};
 
-pub fn list_repos(
+pub async fn list_repos(
     limit: i64,
     cursor: Option<String>,
     q: Option<String>,
 ) -> Result<PagedResponse<RepoSummary>, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let limit = limit.clamp(1, 100);
     let offset = cursor
         .and_then(|value| value.parse::<i64>().ok())
@@ -42,18 +43,20 @@ pub fn list_repos(
     let all_rows = repos::table
         .order(repos::updated_at.desc())
         .select(RepoRow::as_select())
-        .load::<RepoRow>(&mut conn)?;
+        .load::<RepoRow>(&mut conn)
+        .await?;
     let flock_rows = flocks::table
         .filter(flocks::repo_id.eq_any(all_rows.iter().map(|row| row.id).collect::<Vec<_>>()))
         .filter(flocks::soft_deleted_at.is_null())
         .select(FlockRow::as_select())
-        .load::<FlockRow>(&mut conn)?;
+        .load::<FlockRow>(&mut conn)
+        .await?;
     let mut flock_counts = HashMap::new();
     for row in &flock_rows {
         *flock_counts.entry(row.repo_id).or_insert(0i64) += 1;
     }
     let flock_skill_counts =
-        load_flock_skill_counts(&mut conn, flock_rows.iter().map(|row| row.id).collect())?;
+        load_flock_skill_counts(&mut conn, flock_rows.iter().map(|row| row.id).collect()).await?;
     let repo_skill_counts = load_repo_skill_counts(&flock_rows, &flock_skill_counts);
 
     if let Some(ref q_str) = search_query {
@@ -144,7 +147,7 @@ pub fn list_repos(
     }
 }
 
-pub fn create_repo(
+pub async fn create_repo(
     auth: &AuthContext,
     request: CreateRepoRequest,
 ) -> Result<RepoDetailResponse, AppError> {
@@ -169,11 +172,12 @@ pub fn create_repo(
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_default();
 
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     if repos::table
         .filter(repos::git_url.eq(&git_url))
         .select(repos::id)
         .first::<Uuid>(&mut conn)
+        .await
         .optional()?
         .is_some()
     {
@@ -202,7 +206,8 @@ pub fn create_repo(
 
     diesel::insert_into(repos::table)
         .values(&row)
-        .execute(&mut conn)?;
+        .execute(&mut conn)
+        .await?;
 
     insert_audit_log(
         &mut conn,
@@ -214,19 +219,24 @@ pub fn create_repo(
             "git_url": row.git_url,
             "name": row.name,
         }),
-    )?;
+    )
+    .await?;
 
-    get_repo_detail(&domain, &path_slug)
+    get_repo_detail(&domain, &path_slug).await
 }
 
-pub fn get_repo_detail(domain: &str, path_slug: &str) -> Result<RepoDetailResponse, AppError> {
-    let mut conn = db_conn()?;
+pub async fn get_repo_detail(
+    domain: &str,
+    path_slug: &str,
+) -> Result<RepoDetailResponse, AppError> {
+    let mut conn = db_conn().await?;
     let repo_path = format!("{domain}/{path_slug}");
     let git_url = sign_to_git_url(domain, path_slug);
     let repo = repos::table
         .filter(repos::git_url.eq(&git_url))
         .select(RepoRow::as_select())
         .first::<RepoRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("repo `{repo_path}` does not exist")))?;
     let flock_rows = flocks::table
@@ -234,7 +244,8 @@ pub fn get_repo_detail(domain: &str, path_slug: &str) -> Result<RepoDetailRespon
         .filter(flocks::soft_deleted_at.is_null())
         .order(flocks::updated_at.desc())
         .select(FlockRow::as_select())
-        .load::<FlockRow>(&mut conn)?;
+        .load::<FlockRow>(&mut conn)
+        .await?;
     let flock_ids = flock_rows.iter().map(|row| row.id).collect::<Vec<_>>();
     let importing_users = load_users_map(
         &mut conn,
@@ -242,8 +253,9 @@ pub fn get_repo_detail(domain: &str, path_slug: &str) -> Result<RepoDetailRespon
             .iter()
             .map(|row| row.imported_by_user_id)
             .collect(),
-    )?;
-    let flock_skill_counts = load_flock_skill_counts(&mut conn, flock_ids.clone())?;
+    )
+    .await?;
+    let flock_skill_counts = load_flock_skill_counts(&mut conn, flock_ids.clone()).await?;
     let skill_rows = if flock_ids.is_empty() {
         Vec::new()
     } else {
@@ -251,7 +263,8 @@ pub fn get_repo_detail(domain: &str, path_slug: &str) -> Result<RepoDetailRespon
             .filter(skills::flock_id.eq_any(&flock_ids))
             .filter(skills::soft_deleted_at.is_null())
             .select(SkillRow::as_select())
-            .load::<SkillRow>(&mut conn)?
+            .load::<SkillRow>(&mut conn)
+            .await?
     };
     let flocks = flock_rows
         .iter()
@@ -294,46 +307,47 @@ pub async fn import_flock(
     path_slug: &str,
     request: ImportFlockRequest,
 ) -> Result<FlockDetailResponse, AppError> {
-    let repo = load_import_target(auth, domain, path_slug)?;
-    persist_flock_import(auth, &repo, &request.slug, request.document, request.skills)
+    let repo = load_import_target(auth, domain, path_slug).await?;
+    persist_flock_import(auth, &repo, &request.slug, request.document, request.skills).await
 }
 
-pub fn import_flock_seeded(
+pub async fn import_flock_seeded(
     auth: &AuthContext,
     domain: &str,
     path_slug: &str,
     request: ImportFlockRequest,
 ) -> Result<FlockDetailResponse, AppError> {
-    let repo = load_import_target(auth, domain, path_slug)?;
-    persist_flock_import(auth, &repo, &request.slug, request.document, request.skills)
+    let repo = load_import_target(auth, domain, path_slug).await?;
+    persist_flock_import(auth, &repo, &request.slug, request.document, request.skills).await
 }
 
-fn load_import_target(
+async fn load_import_target(
     _auth: &AuthContext,
     domain: &str,
     path_slug: &str,
 ) -> Result<RepoRow, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_path = format!("{domain}/{path_slug}");
     let git_url = sign_to_git_url(domain, path_slug);
     let repo = repos::table
         .filter(repos::git_url.eq(&git_url))
         .select(RepoRow::as_select())
         .first::<RepoRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("repo `{repo_path}` does not exist")))?;
 
     Ok(repo)
 }
 
-fn persist_flock_import(
+async fn persist_flock_import(
     auth: &AuthContext,
     repo: &RepoRow,
     flock_slug: &str,
     mut document: FlockDocument,
     skills: Vec<ImportedSkillRecord>,
 ) -> Result<FlockDetailResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_sign_str = derive_repo_sign(&repo.git_url);
 
     if document.repo != repo.git_url && document.repo != repo_sign_str {
@@ -376,6 +390,7 @@ fn persist_flock_import(
         .filter(flocks::slug.eq(flock_slug))
         .select(FlockRow::as_select())
         .first::<FlockRow>(&mut conn)
+        .await
         .optional()?;
 
     let now = Utc::now();
@@ -446,19 +461,22 @@ fn persist_flock_import(
     };
 
     let updated_existing_flock = existing_flock.is_some();
+    let result_flock_slug = flock_row.slug.clone();
 
-    conn.transaction::<_, AppError, _>(|conn| {
+    conn.transaction::<_, AppError, _>(async move |conn| {
         if let Some(existing_flock) = &existing_flock {
             diesel::update(flocks::table.find(existing_flock.id))
                 .set(&flock_changeset)
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
 
             // Load existing skills indexed by path for upsert matching.
             let existing_skills = skills::table
                 .filter(skills::flock_id.eq(existing_flock.id))
                 .filter(skills::repo_id.eq(repo.id))
                 .select(SkillRow::as_select())
-                .load::<SkillRow>(conn)?;
+                .load::<SkillRow>(conn)
+                .await?;
             let existing_by_path: HashMap<String, SkillRow> = existing_skills
                 .into_iter()
                 .map(|row| (row.path.clone(), row))
@@ -493,7 +511,8 @@ fn persist_flock_import(
                             updated_at: Some(now),
                             ..Default::default()
                         })
-                        .execute(conn)?;
+                        .execute(conn)
+                        .await?;
                 } else {
                     // Insert new skill
                     diesel::insert_into(skills::table)
@@ -532,7 +551,8 @@ fn persist_flock_import(
                             created_at: now,
                             updated_at: now,
                         })
-                        .execute(conn)?;
+                        .execute(conn)
+                        .await?;
                 }
             }
 
@@ -544,12 +564,14 @@ fn persist_flock_import(
                 .collect();
             if !removed_ids.is_empty() {
                 diesel::delete(skills::table.filter(skills::id.eq_any(&removed_ids)))
-                    .execute(conn)?;
+                    .execute(conn)
+                    .await?;
             }
         } else {
             diesel::insert_into(flocks::table)
                 .values(&flock_row)
-                .execute(conn)?;
+                .execute(conn)
+                .await?;
 
             let mut skill_rows = Vec::with_capacity(skills.len());
             for skill in &skills {
@@ -598,7 +620,8 @@ fn persist_flock_import(
             for chunk in skill_rows.chunks(500) {
                 diesel::insert_into(skills::table)
                     .values(chunk)
-                    .execute(conn)?;
+                    .execute(conn)
+                    .await?;
             }
         }
 
@@ -614,29 +637,32 @@ fn persist_flock_import(
                 "skill_count": skills.len(),
                 "updated": updated_existing_flock,
             }),
-        )?;
+        )
+        .await?;
 
         Ok(())
-    })?;
+    })
+    .await?;
 
     let rs = derive_repo_sign(&repo.git_url);
     let (d, ps) = split_repo_path(&rs);
-    get_flock_detail(d, ps, &flock_row.slug, None)
+    get_flock_detail(d, ps, &result_flock_slug, None).await
 }
 
-pub fn get_flock_detail(
+pub async fn get_flock_detail(
     domain: &str,
     path_slug: &str,
     flock_slug: &str,
     viewer: Option<&RequestUser>,
 ) -> Result<FlockDetailResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let repo_path = format!("{domain}/{path_slug}");
     let git_url = sign_to_git_url(domain, path_slug);
     let repo = repos::table
         .filter(repos::git_url.eq(&git_url))
         .select(RepoRow::as_select())
         .first::<RepoRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound(format!("repo `{repo_path}` does not exist")))?;
     let flock = flocks::table
@@ -644,28 +670,31 @@ pub fn get_flock_detail(
         .filter(flocks::slug.eq(flock_slug))
         .select(FlockRow::as_select())
         .first::<FlockRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| {
             AppError::NotFound(format!(
                 "flock `{flock_slug}` does not exist under repo `{repo_path}`"
             ))
         })?;
-    let users = load_users_map(&mut conn, vec![flock.imported_by_user_id])?;
+    let users = load_users_map(&mut conn, vec![flock.imported_by_user_id]).await?;
     let skills = skills::table
         .filter(skills::flock_id.eq(flock.id))
         .filter(skills::soft_deleted_at.is_null())
         .order(skills::slug.asc())
         .select(SkillRow::as_select())
-        .load::<SkillRow>(&mut conn)?;
+        .load::<SkillRow>(&mut conn)
+        .await?;
     let document = flock_document_from_row(&repo, &flock)?;
-    let comments = fetch_flock_comments(&mut conn, flock.id, viewer)?;
-    let user_rating = viewer
-        .map(|v| get_user_flock_rating(&mut conn, flock.id, v.id))
-        .transpose()?
-        .flatten();
-    let starred = viewer
-        .map(|v| is_flock_starred(&mut conn, flock.id, v.id))
-        .unwrap_or(false);
+    let comments = fetch_flock_comments(&mut conn, flock.id, viewer).await?;
+    let user_rating = match viewer {
+        Some(v) => get_user_flock_rating(&mut conn, flock.id, v.id).await?,
+        None => None,
+    };
+    let starred = match viewer {
+        Some(v) => is_flock_starred(&mut conn, flock.id, v.id).await,
+        None => false,
+    };
     Ok(FlockDetailResponse {
         flock: flock_summary_from_row(&flock, &repo, &users, skills.len() as i64)?,
         document,
@@ -679,37 +708,41 @@ pub fn get_flock_detail(
     })
 }
 
-pub fn get_flock_by_id(
+pub async fn get_flock_by_id(
     flock_id: Uuid,
     viewer: Option<&RequestUser>,
 ) -> Result<FlockDetailResponse, AppError> {
-    let mut conn = db_conn()?;
+    let mut conn = db_conn().await?;
     let flock = flocks::table
         .find(flock_id)
         .select(FlockRow::as_select())
         .first::<FlockRow>(&mut conn)
+        .await
         .optional()?
         .ok_or_else(|| AppError::NotFound("flock not found".to_string()))?;
     let repo = repos::table
         .find(flock.repo_id)
         .select(RepoRow::as_select())
-        .first::<RepoRow>(&mut conn)?;
-    let users = load_users_map(&mut conn, vec![flock.imported_by_user_id])?;
+        .first::<RepoRow>(&mut conn)
+        .await?;
+    let users = load_users_map(&mut conn, vec![flock.imported_by_user_id]).await?;
     let skills = skills::table
         .filter(skills::flock_id.eq(flock.id))
         .filter(skills::soft_deleted_at.is_null())
         .order(skills::slug.asc())
         .select(SkillRow::as_select())
-        .load::<SkillRow>(&mut conn)?;
+        .load::<SkillRow>(&mut conn)
+        .await?;
     let document = flock_document_from_row(&repo, &flock)?;
-    let comments = fetch_flock_comments(&mut conn, flock.id, viewer)?;
-    let user_rating = viewer
-        .map(|v| get_user_flock_rating(&mut conn, flock.id, v.id))
-        .transpose()?
-        .flatten();
-    let starred = viewer
-        .map(|v| is_flock_starred(&mut conn, flock.id, v.id))
-        .unwrap_or(false);
+    let comments = fetch_flock_comments(&mut conn, flock.id, viewer).await?;
+    let user_rating = match viewer {
+        Some(v) => get_user_flock_rating(&mut conn, flock.id, v.id).await?,
+        None => None,
+    };
+    let starred = match viewer {
+        Some(v) => is_flock_starred(&mut conn, flock.id, v.id).await,
+        None => false,
+    };
     Ok(FlockDetailResponse {
         flock: flock_summary_from_row(&flock, &repo, &users, skills.len() as i64)?,
         document,
@@ -723,8 +756,8 @@ pub fn get_flock_by_id(
     })
 }
 
-pub(crate) fn load_flock_skill_counts(
-    conn: &mut PgConnection,
+pub(crate) async fn load_flock_skill_counts(
+    conn: &mut AsyncPgConnection,
     flock_ids: Vec<Uuid>,
 ) -> Result<HashMap<Uuid, i64>, AppError> {
     if flock_ids.is_empty() {
@@ -734,7 +767,8 @@ pub(crate) fn load_flock_skill_counts(
         .filter(skills::flock_id.eq_any(flock_ids))
         .filter(skills::soft_deleted_at.is_null())
         .select(SkillRow::as_select())
-        .load::<SkillRow>(conn)?;
+        .load::<SkillRow>(conn)
+        .await?;
     let mut counts = HashMap::new();
     for row in rows {
         *counts.entry(row.flock_id).or_insert(0) += 1;

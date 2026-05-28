@@ -1,5 +1,4 @@
-use std::env;
-use std::fmt;
+use std::{env, fmt};
 
 use anyhow::{Context, Result};
 
@@ -48,7 +47,11 @@ impl Config {
 }
 
 fn redact(value: &str) -> &'static str {
-    if value.is_empty() { "<unset>" } else { "<redacted>" }
+    if value.is_empty() {
+        "<unset>"
+    } else {
+        "<redacted>"
+    }
 }
 
 fn redact_opt(value: Option<&String>) -> &'static str {
@@ -78,7 +81,10 @@ impl fmt::Debug for Config {
             .field("ai_api_url", &self.ai_api_url)
             .field("ai_chat_model", &self.ai_chat_model)
             .field("ai_security_model", &self.ai_security_model)
-            .field("auto_index_min_interval_secs", &self.auto_index_min_interval_secs)
+            .field(
+                "auto_index_min_interval_secs",
+                &self.auto_index_min_interval_secs,
+            )
             .field("max_parallel_index_jobs", &self.max_parallel_index_jobs)
             .field("ai_security_scan_enabled", &self.ai_security_scan_enabled)
             .field("ai_chat_concurrency", &self.ai_chat_concurrency)

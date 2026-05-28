@@ -1,37 +1,43 @@
 use chrono::Utc;
 use diesel::dsl::count_star;
 use diesel::prelude::*;
+use diesel_async::{AsyncPgConnection, RunQueryDsl};
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::models::NewUserRow;
 use crate::schema::{user_tokens, users};
 
-pub fn ensure_seed_data(pool: &crate::db::PgPool) -> Result<(), AppError> {
+pub async fn ensure_seed_data(pool: &crate::db::AsyncPgPool) -> Result<(), AppError> {
     let mut conn = pool
         .get()
+        .await
         .map_err(|error| AppError::Internal(error.to_string()))?;
-    prune_legacy_demo_tokens(&mut conn)?;
+    prune_legacy_demo_tokens(&mut conn).await?;
 
-    let user_count = users::table.select(count_star()).first::<i64>(&mut conn)?;
+    let user_count = users::table
+        .select(count_star())
+        .first::<i64>(&mut conn)
+        .await?;
     if user_count == 0 {
-        insert_demo_users(&mut conn)?;
+        insert_demo_users(&mut conn).await?;
     }
 
     Ok(())
 }
 
-fn prune_legacy_demo_tokens(conn: &mut PgConnection) -> Result<(), AppError> {
+async fn prune_legacy_demo_tokens(conn: &mut AsyncPgConnection) -> Result<(), AppError> {
     diesel::delete(user_tokens::table.filter(user_tokens::token.eq_any(vec![
         "savhub_admin_demo",
         "savhub_creator_demo",
         "savhub_viewer_demo",
     ])))
-    .execute(conn)?;
+    .execute(conn)
+    .await?;
     Ok(())
 }
 
-fn insert_demo_users(conn: &mut PgConnection) -> Result<(), AppError> {
+async fn insert_demo_users(conn: &mut AsyncPgConnection) -> Result<(), AppError> {
     let now = Utc::now();
     let admin_id = Uuid::now_v7();
     let creator_id = Uuid::now_v7();
@@ -76,7 +82,8 @@ fn insert_demo_users(conn: &mut PgConnection) -> Result<(), AppError> {
                 updated_at: now,
             },
         ])
-        .execute(conn)?;
+        .execute(conn)
+        .await?;
 
     Ok(())
 }

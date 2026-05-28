@@ -9,8 +9,8 @@ use savhub_shared::{
 use crate::api;
 use crate::app::{Route, SCROLL_PAGE_SIZE, format_local_datetime, token_option, url_lang};
 use crate::contexts::{AdminTabCtx, ApiContext, I18nContext};
-use crate::location::near_window_bottom;
 use crate::i18n::T;
+use crate::location::near_window_bottom;
 use crate::pages::widgets::StatTile;
 
 #[component]
